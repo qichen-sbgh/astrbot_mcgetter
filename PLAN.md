@@ -4,15 +4,15 @@
 
 ## 范围
 
-| ID | 项 | 提交粒度 |
-|----|----|----------|
-| F1 | `/mc` 并发查询 + 单服超时 | 1 commit |
-| F3 | 卡片展示 MOTD | 1 commit |
-| F6 | 内置多主题 + 按群存储 + `/mctem list` | 1 commit（含 p-mctem） |
-| P1 | README 与代码对齐 | 1 commit |
-| P2 | 清理天数可配置 | 1 commit |
-| P3 | 图标本地缓存 | 1 commit |
-| P4 | 版本号统一 | 1 commit |
+| ID | 项 | 提交粒度 | 状态 |
+|----|----|----------|------|
+| F1 | `/mc` 并发查询 + 单服超时 | 1 commit | done |
+| F3 | 卡片展示 MOTD | 1 commit | done |
+| F6 | 内置多主题 + 按群存储 + `/mctem list` | 1 commit（含 p-mctem） | done |
+| P1 | README 与代码对齐 | 1 commit | done |
+| P2 | 清理天数可配置 | 1 commit | done |
+| P3 | 图标本地缓存 | 1 commit | done |
+| P4 | 版本号统一 | 1 commit | done |
 
 ---
 
