@@ -5,7 +5,7 @@ from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from .script.get_server_info import get_server_status
-from .script.template_selector import write_config, get_img
+from .script.template_selector import get_img, format_template_help, resolve_template_name
 from .script.mcbind_service import McBindService
 from .script.mcq_service import McqService
 from .script.json_operate import (
@@ -14,6 +14,7 @@ from .script.json_operate import (
     update_server_status, auto_cleanup_servers,
     set_server_name_color, set_player_name_color,
     clear_server_name_color, clear_player_name_color, list_colors,
+    get_group_template, set_group_template,
 )
 import asyncio
 import re
@@ -66,8 +67,10 @@ HELP_INFO = """
 --将用户加入 /mcq 权限白名单
 --仅系统管理员、群主、群管理员或群等级达到阈值的用户可操作
 
-/mctem
---切换图片渲染模板
+/mctem [list|<主题名>]
+--查看或切换本群图片渲染主题
+--内置: neon classic dashboard inventory soft compact
+--也可使用数据目录 template/ 下的自定义脚本名
 
 /mccolor server 服务器名称/ID 颜色
 --设置该服务器在卡片上的名称颜色
@@ -117,14 +120,40 @@ class MyPlugin(Star):
         yield event.plain_result(HELP_INFO)
 
     @filter.command("mctem")
-    async def change_mctem(self,event: AstrMessageEvent,name: str)-> MessageEventResult:
-        if name is None:
-            yield event.plain_result("请指定模板名称")
+    async def change_mctem(
+        self,
+        event: AstrMessageEvent,
+        name: str = "",
+    ) -> MessageEventResult:
+        """
+        查看或切换本群卡片主题。
 
-        if write_config(name):
-            yield event.plain_result("模板切换成功")
-        else:
-            yield event.plain_result("模板配置文件写入失败")
+        /mctem
+        /mctem list
+        /mctem <主题名>
+        """
+        try:
+            group_id = event.get_group_id()
+            json_path = str(await self.get_json_path(group_id))
+            current = await get_group_template(json_path)
+            action = (name or "").strip()
+
+            if not action or action.lower() in ("list", "ls", "help", "?"):
+                yield event.plain_result(format_template_help(current))
+                return
+
+            ok, resolved, err = resolve_template_name(action)
+            if not ok:
+                yield event.plain_result(err)
+                return
+
+            success, msg = await set_group_template(json_path, resolved)
+            if success:
+                yield event.plain_result(msg + "\n使用 /mctem list 可查看全部主题。")
+            else:
+                yield event.plain_result(msg)
+        except Exception as e:
+            yield event.plain_result("切换模板时发生错误:" + str(e))
 
     @filter.command("mccolor")
     async def mccolor(
@@ -253,6 +282,7 @@ class MyPlugin(Star):
             
             servers = json_data.get("servers", {})
             colors = json_data.get("colors") if isinstance(json_data.get("colors"), dict) else {}
+            template = str(json_data.get("template") or "neon")
             server_items = list(servers.items())
 
             async def _query_one(server_id: Any, server_info: Dict[str, Any]) -> Optional[str]:
@@ -265,6 +295,7 @@ class MyPlugin(Star):
                         str(json_path),
                         last_success_time=server_info.get("last_success_time"),
                         colors=colors,
+                        template=template,
                     )
                 except Exception:
                     try:
@@ -272,6 +303,7 @@ class MyPlugin(Star):
                             server_id=server_id,
                             server_info=server_info,
                             colors=colors,
+                            template=template,
                         )
                     except Exception:
                         return None
@@ -661,6 +693,7 @@ class MyPlugin(Star):
         server_id: Any,
         server_info: Dict[str, Any],
         colors: Optional[Dict[str, Any]] = None,
+        template: Optional[str] = None,
     ) -> str:
         """渲染单张离线卡，供并发查询失败回退使用。"""
         colors = colors if isinstance(colors, dict) else {}
@@ -682,6 +715,7 @@ class MyPlugin(Star):
             ),
             server_name_color=server_name_color,
             player_colors=colors.get("players") or {},
+            template=template,
         )
 
     async def _update_status_safe(
@@ -701,9 +735,10 @@ class MyPlugin(Star):
         json_path: Optional[str] = None,
         last_success_time: Any = None,
         colors: Optional[Dict[str, Any]] = None,
+        template: Optional[str] = None,
     ) -> Optional[str]:
         """
-        获取服务器信息图片（霓虹玻璃默认卡；失败时返回离线卡）
+        获取服务器信息图片（失败时返回离线卡）
 
         Args:
             server_name: 服务器名称
@@ -712,6 +747,7 @@ class MyPlugin(Star):
             json_path: JSON文件路径（用于更新状态）
             last_success_time: 上次成功查询时间戳（离线卡展示用）
             colors: 群维度颜色配置 {server_names, players}
+            template: 群维度卡片主题
 
         Returns:
             图片的base64编码字符串；查询失败时返回离线卡，渲染彻底失败才返回None
@@ -737,6 +773,7 @@ class MyPlugin(Star):
                     last_success_text=self._format_last_success(last_success_time),
                     server_name_color=server_name_color,
                     player_colors=player_colors,
+                    template=template,
                 )
             except Exception:
                 return None
@@ -773,6 +810,7 @@ class MyPlugin(Star):
                 server_name_color=server_name_color,
                 player_colors=player_colors,
                 motd=info.get("motd") or "",
+                template=template,
             )
 
         except Exception:

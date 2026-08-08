@@ -18,6 +18,8 @@ DEFAULT_CONFIG = {
     "next_id": 1,
     "servers": {},
     "last_cleanup": None,
+    # 群维度卡片主题：neon / classic / dashboard / inventory / soft / compact 或自定义模板名
+    "template": "neon",
     # 群维度渲染颜色：server_names 按服务器 ID；players 按玩家名（跨服生效）
     "colors": {
         "server_names": {},
@@ -143,6 +145,7 @@ async def read_json(json_path: str) -> Dict[str, Any]:
             if "servers" not in data:
                 data["servers"] = {}
             data = ensure_colors_section(data)
+            data = ensure_template_field(data)
             
             logger.info(f"成功读取JSON文件: {json_path}, 数据: {data}")
             return data
@@ -492,6 +495,45 @@ def ensure_colors_section(data: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(colors.get("players"), dict):
         colors["players"] = {}
     return data
+
+
+def ensure_template_field(data: Dict[str, Any], fallback: str = "neon") -> Dict[str, Any]:
+    """Ensure group config has a non-empty template string."""
+    raw = data.get("template")
+    if not isinstance(raw, str) or not raw.strip():
+        data["template"] = fallback or "neon"
+    else:
+        data["template"] = raw.strip()
+    return data
+
+
+async def get_group_template(json_path: str, fallback: str = "neon") -> str:
+    """Read per-group card template id."""
+    try:
+        data = await read_json(json_path)
+        ensure_template_field(data, fallback=fallback)
+        return str(data.get("template") or fallback)
+    except Exception as e:
+        logger.error(f"读取群模板失败: {e}")
+        return fallback
+
+
+async def set_group_template(json_path: str, template_name: str) -> Tuple[bool, str]:
+    """
+    Set per-group card template id.
+    Returns (ok, message).
+    """
+    name = (template_name or "").strip()
+    if not name:
+        return False, "模板名称不能为空"
+    try:
+        data = await read_json(json_path)
+        data["template"] = name
+        await write_json(json_path, data)
+        return True, f"已切换本群卡片主题为：{name}"
+    except Exception as e:
+        logger.error(f"设置群模板失败: {e}")
+        return False, f"写入模板配置失败: {e}"
 
 
 def parse_color_to_hex(color: str) -> Optional[str]:
