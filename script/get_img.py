@@ -5,7 +5,9 @@ Default server-status card renderer — Design F · Neon Glass.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
+from collections import OrderedDict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -14,6 +16,10 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 RESOURCE_DIR = Path(__file__).resolve().parent.parent / "resource"
 FONT_PATH = RESOURCE_DIR / "msyh.ttf"
 DEFAULT_ICON_PATH = RESOURCE_DIR / "default_icon.png"
+
+# 解码后的服务器图标内存 LRU 缓存（进程内；重启清空）
+_ICON_CACHE_MAX = 64
+_icon_cache: "OrderedDict[str, Image.Image]" = OrderedDict()
 
 
 # ---------------------------------------------------------------------------
@@ -39,19 +45,48 @@ async def load_font(font_size: int):
         return ImageFont.load_default()
 
 
+def _icon_cache_get(key: str) -> Optional[Image.Image]:
+    cached = _icon_cache.get(key)
+    if cached is None:
+        return None
+    _icon_cache.move_to_end(key)
+    return cached.copy()
+
+
+def _icon_cache_put(key: str, img: Image.Image) -> None:
+    if key in _icon_cache:
+        _icon_cache.move_to_end(key)
+    _icon_cache[key] = img.copy()
+    while len(_icon_cache) > _ICON_CACHE_MAX:
+        _icon_cache.popitem(last=False)
+
+
 async def fetch_icon(icon_base64: Optional[str] = None) -> Image.Image:
-    """Decode server icon; fall back to bundled default icon."""
+    """Decode server icon (with in-memory LRU); fall back to bundled default icon."""
     if icon_base64:
         try:
             raw = icon_base64.split(",", 1)[1] if "," in icon_base64 else icon_base64
+            cache_key = hashlib.sha1(raw.encode("utf-8", errors="ignore")).hexdigest()[:16]
+            cached = _icon_cache_get(cache_key)
+            if cached is not None:
+                return cached
             img = Image.open(io.BytesIO(base64.b64decode(raw))).convert("RGBA")
-            return img
+            _icon_cache_put(cache_key, img)
+            return img.copy()
         except Exception as e:
             print(f"Base64图标解码失败: {e}")
 
+    # 默认图标：固定 key，避免反复读盘
+    default_key = "__default__"
+    cached_default = _icon_cache_get(default_key)
+    if cached_default is not None:
+        return cached_default
+
     if DEFAULT_ICON_PATH.exists():
         try:
-            return Image.open(DEFAULT_ICON_PATH).convert("RGBA")
+            img = Image.open(DEFAULT_ICON_PATH).convert("RGBA")
+            _icon_cache_put(default_key, img)
+            return img.copy()
         except Exception:
             pass
 
@@ -59,7 +94,8 @@ async def fetch_icon(icon_base64: Optional[str] = None) -> Image.Image:
     img = Image.new("RGBA", (64, 64), (40, 50, 70, 255))
     d = ImageDraw.Draw(img)
     d.rounded_rectangle((4, 4, 59, 59), 12, fill=(0, 180, 150, 255))
-    return img
+    _icon_cache_put(default_key, img)
+    return img.copy()
 
 
 # ---------------------------------------------------------------------------
