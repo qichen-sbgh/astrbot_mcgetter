@@ -1,3 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Local / IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
 # Generated search/debug outputs
 search_results.txt
 search_results*.txt
@@ -6,3 +28,6 @@ search_results*.txt
 # Local temporary outputs
 *.tmp
 *.temp
+
+# Design prototypes & local render previews (not for plugin release)
+design_prototypes/
