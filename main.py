@@ -142,87 +142,48 @@ class MyPlugin(Star):
                     return
             
             message_chain: List[Comp.Image] = []
-            failed_servers: List[Dict[str, Any]] = []
             servers = json_data.get("servers", {})
             
             for server_id, server_info in servers.items():
                 try:
-                    mcinfo_img = await self.get_img(server_info['name'], server_info['host'], server_id, str(json_path))
+                    mcinfo_img = await self.get_img(
+                        server_info['name'],
+                        server_info['host'],
+                        server_id,
+                        str(json_path),
+                        last_success_time=server_info.get("last_success_time"),
+                    )
                     if mcinfo_img:
                         message_chain.append(Comp.Image.fromBase64(mcinfo_img))
-                    else:
-                        failed_servers.append({
-                            "id": server_id,
-                            "name": server_info.get("name", "未知服务器"),
-                            "host": server_info.get("host", "未知地址"),
-                            "last_success_time": server_info.get("last_success_time")
-                        })
-
-                except Exception as e:
-                    failed_servers.append({
-                        "id": server_id,
-                        "name": server_info.get("name", "未知服务器"),
-                        "host": server_info.get("host", "未知地址"),
-                        "last_success_time": server_info.get("last_success_time")
-                    })
-                    continue
+                except Exception:
+                    # 渲染异常时尽量补一张离线卡，避免整轮静默丢失
+                    try:
+                        offline_img = await get_img(
+                            players_list=[],
+                            latency=-1,
+                            server_name=server_info.get("name", "未知服务器"),
+                            plays_max=0,
+                            plays_online=0,
+                            server_version="—",
+                            icon_base64=None,
+                            server_id=str(server_id),
+                            host=server_info.get("host", ""),
+                            online_state="offline",
+                            last_success_text=self._format_last_success(
+                                server_info.get("last_success_time")
+                            ),
+                        )
+                        message_chain.append(Comp.Image.fromBase64(offline_img))
+                    except Exception:
+                        continue
 
             if message_chain:
                 yield event.chain_result(message_chain)
-
-            if failed_servers:
-                failed_server_forward_chain = self.build_failed_servers_forward_chain(failed_servers)
-                yield event.chain_result(failed_server_forward_chain)
-
-            if not message_chain and not failed_servers:
+            else:
                 yield event.plain_result("没有可用的服务器信息，请检查服务器是否在线")
                 
         except Exception as e:
             yield event.plain_result("查询服务器信息时发生错误:"+str(e))
-
-    def build_failed_servers_forward_chain(self, failed_servers: List[Dict[str, Any]]) -> List[Comp.Nodes]:
-        """
-        构建查询失败服务器的合并转发消息链
-
-        Args:
-            failed_servers: 查询失败的服务器信息列表
-
-        Returns:
-            List[Comp.Nodes]: 单条合并转发消息链
-        """
-        nodes: List[Comp.Node] = [
-            Comp.Node(
-                uin="0",
-                name="MCGetter",
-                content=[
-                    Comp.Plain(f"本次查询共有 {len(failed_servers)} 个服务器失败，详情如下：")
-                ]
-            )
-        ]
-
-        for server in failed_servers:
-            last_success_time = server.get("last_success_time")
-            if isinstance(last_success_time, (int, float)) and last_success_time > 0:
-                last_success_text = strftime('%Y-%m-%d %H:%M:%S', localtime(last_success_time))
-            else:
-                last_success_text = "从未查询成功"
-
-            nodes.append(
-                Comp.Node(
-                    uin="0",
-                    name="MCGetter",
-                    content=[
-                        Comp.Plain(
-                            f"ID: {server.get('id', '未知')}\n"
-                            f"名称: {server.get('name', '未知服务器')}\n"
-                            f"地址: {server.get('host', '未知地址')}\n"
-                            f"最后查询成功时间: {last_success_text}"
-                        )
-                    ]
-                )
-            )
-
-        return [Comp.Nodes(nodes=nodes)]
 
     @filter.command("mcadd")
     async def mcadd(
@@ -579,51 +540,87 @@ class MyPlugin(Star):
         except Exception as e:
             yield event.plain_result("自动清理时发生错误:"+str(e))
 
-    async def get_img(self, server_name: str, host: str, server_id: Optional[str] = None, json_path: Optional[str] = None) -> Optional[str]:
+    def _format_last_success(self, last_success_time: Any) -> Optional[str]:
+        """Format last successful query timestamp for offline cards."""
+        if isinstance(last_success_time, (int, float)) and last_success_time > 0:
+            return strftime('%Y-%m-%d %H:%M:%S', localtime(last_success_time))
+        return None
+
+    async def get_img(
+        self,
+        server_name: str,
+        host: str,
+        server_id: Optional[str] = None,
+        json_path: Optional[str] = None,
+        last_success_time: Any = None,
+    ) -> Optional[str]:
         """
-        获取服务器信息图片
+        获取服务器信息图片（霓虹玻璃默认卡；失败时返回离线卡）
 
         Args:
             server_name: 服务器名称
             host: 服务器地址
             server_id: 服务器ID（可选）
             json_path: JSON文件路径（用于更新状态）
+            last_success_time: 上次成功查询时间戳（离线卡展示用）
 
         Returns:
-            图片的base64编码字符串，如果获取失败则返回None
+            图片的base64编码字符串；查询失败时返回离线卡，渲染彻底失败才返回None
         """
         try:
             info = await get_server_status(host)
             if not info:
-                # 更新查询失败状态
                 if json_path and server_id:
                     await update_server_status(json_path, server_id, False)
-                return None
+                return await get_img(
+                    players_list=[],
+                    latency=-1,
+                    server_name=server_name,
+                    plays_max=0,
+                    plays_online=0,
+                    server_version="—",
+                    icon_base64=None,
+                    server_id=str(server_id) if server_id is not None else None,
+                    host=host,
+                    online_state="offline",
+                    last_success_text=self._format_last_success(last_success_time),
+                )
 
-            # 更新查询成功状态
             if json_path and server_id:
                 await update_server_status(json_path, server_id, True)
 
-            info['server_name'] = server_name
-            # 如果有服务器ID，则在名称前添加ID
-            display_name = f"[{server_id}]{server_name}" if server_id else server_name
-            
-            mcinfo_img = await get_img(
+            return await get_img(
                 players_list=info['players_list'],
                 latency=info['latency'],
-                server_name=display_name,
+                server_name=server_name,
                 plays_max=info['plays_max'],
                 plays_online=info['plays_online'],
                 server_version=info['server_version'],
-                icon_base64=info['icon_base64']
+                icon_base64=info['icon_base64'],
+                server_id=str(server_id) if server_id is not None else None,
+                host=host,
+                online_state="online",
             )
-            return mcinfo_img
-            
-        except Exception as e:
-            # 更新查询失败状态
+
+        except Exception:
             if json_path and server_id:
                 await update_server_status(json_path, server_id, False)
-            return None
+            try:
+                return await get_img(
+                    players_list=[],
+                    latency=-1,
+                    server_name=server_name,
+                    plays_max=0,
+                    plays_online=0,
+                    server_version="—",
+                    icon_base64=None,
+                    server_id=str(server_id) if server_id is not None else None,
+                    host=host,
+                    online_state="offline",
+                    last_success_text=self._format_last_success(last_success_time),
+                )
+            except Exception:
+                return None
 
     async def get_json_path(self, group_id: str) -> Path:
         """
