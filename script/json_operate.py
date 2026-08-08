@@ -1,5 +1,6 @@
 import json
 import asyncio
+import re
 from pathlib import Path
 import aiofiles
 from typing import Dict, Any, Optional, Tuple, List
@@ -221,7 +222,8 @@ async def add_data(json_path: str, name: str, host: str) -> bool:
             "created_time": current_time,
             "last_success_time": current_time,
             "last_failed_time": None,
-            "failed_count": 0
+            "failed_count": 0,
+            "tags": [],
         }
         
         await write_json(json_path, data)
@@ -543,6 +545,98 @@ async def set_group_template(json_path: str, template_name: str) -> Tuple[bool, 
     except Exception as e:
         logger.error(f"设置群模板失败: {e}")
         return False, f"写入模板配置失败: {e}"
+
+
+def _normalize_tag_list(tags: List[str], limit: int = 8) -> List[str]:
+    """Normalize user-supplied tags for storage."""
+    out: List[str] = []
+    seen = set()
+    for raw in tags:
+        t = str(raw).strip()
+        if not t:
+            continue
+        if len(t) > 16:
+            t = t[:15] + "…"
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def parse_tags_argument(text: str) -> List[str]:
+    """
+    Parse tags from command text.
+    Supports space-separated and comma-separated mixes: 生存 主服,互通
+    """
+    if not text or not str(text).strip():
+        return []
+    parts: List[str] = []
+    for chunk in re.split(r"[,，;/|]+", str(text)):
+        for token in chunk.split():
+            token = token.strip()
+            if token:
+                parts.append(token)
+    return _normalize_tag_list(parts)
+
+
+async def set_server_tags(
+    json_path: str, identifier: str, tags: List[str]
+) -> Tuple[bool, str]:
+    """Set tags on a server (by name or id). Replaces previous tags."""
+    try:
+        data = await read_json(json_path)
+        server_id = resolve_server_id(data, identifier)
+        if not server_id:
+            return False, f"未找到服务器：{identifier}"
+        servers = data.get("servers", {})
+        server = servers.get(server_id)
+        if not server:
+            return False, f"未找到服务器：{identifier}"
+        cleaned = _normalize_tag_list(tags)
+        server["tags"] = cleaned
+        await write_json(json_path, data)
+        if cleaned:
+            return True, f"已为「{server.get('name', server_id)}」设置标签：{' · '.join(cleaned)}"
+        return True, f"已清空「{server.get('name', server_id)}」的标签"
+    except Exception as e:
+        logger.error(f"设置服务器标签失败: {e}")
+        return False, f"设置标签失败: {e}"
+
+
+async def clear_server_tags(json_path: str, identifier: str) -> Tuple[bool, str]:
+    """Clear tags on a server."""
+    return await set_server_tags(json_path, identifier, [])
+
+
+async def list_server_tags(json_path: str) -> str:
+    """Format all servers' tags for display."""
+    try:
+        data = await read_json(json_path)
+        servers = data.get("servers", {})
+        if not servers:
+            return "当前群还没有服务器"
+        lines = ["服务器标签："]
+        any_tag = False
+        for sid, info in servers.items():
+            tags = info.get("tags") if isinstance(info.get("tags"), list) else []
+            tags = [str(t).strip() for t in tags if str(t).strip()]
+            name = info.get("name", sid)
+            if tags:
+                any_tag = True
+                lines.append(f"· [{sid}] {name}：{' · '.join(tags)}")
+            else:
+                lines.append(f"· [{sid}] {name}：（无）")
+        if not any_tag:
+            lines.append("")
+            lines.append("可用：/mctag <名称/ID> 标签1 标签2")
+        return "\n".join(lines)
+    except Exception as e:
+        logger.error(f"列出服务器标签失败: {e}")
+        return f"读取标签失败: {e}"
 
 
 def parse_color_to_hex(color: str) -> Optional[str]:

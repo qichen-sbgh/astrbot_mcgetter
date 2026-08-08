@@ -103,10 +103,12 @@ async def get_img(
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
     template: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     """
     生成服务器信息图片并返回 base64 字符串。
     template: 群维度主题 id；缺省时回退全局 template.txt / neon。
+    tags: 服务器标签，显示在 ID/地址下一行。
     """
     config = (template or "").strip() or read_config()
     config_low = config.lower()
@@ -126,6 +128,7 @@ async def get_img(
         server_name_color=server_name_color,
         player_colors=player_colors,
         motd=motd,
+        tags=tags or [],
     )
 
     # 1) 自定义模板优先（同名可覆盖内置）

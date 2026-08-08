@@ -15,6 +15,7 @@ from .script.json_operate import (
     set_server_name_color, set_player_name_color,
     clear_server_name_color, clear_player_name_color, list_colors,
     get_group_template, set_group_template,
+    set_server_tags, clear_server_tags, list_server_tags, parse_tags_argument,
 )
 import asyncio
 import re
@@ -86,6 +87,16 @@ HELP_INFO = """
 --清除已设置的颜色
 
 --颜色格式: #RRGGBB / #RGB / R,G,B  例如 #00FFC8 或 255,85,255
+
+/mctag <名称/ID> 标签1 标签2
+--为服务器设置标签（显示在卡片 ID/地址下一行，最多8个）
+--标签可用空格或逗号分隔，例如：/mctag 主服 生存 互通,公益
+
+/mctag clear <名称/ID>
+--清除该服务器标签
+
+/mctag list
+--查看本群所有服务器标签
 """
 
 @register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.7.0")
@@ -243,6 +254,61 @@ class MyPlugin(Star):
         except Exception as e:
             yield event.plain_result("设置颜色时发生错误:" + str(e))
 
+    @filter.command("mctag")
+    async def mctag(
+        self,
+        event: AstrMessageEvent,
+        arg1: str = "",
+        arg2: str = "",
+        arg3: str = "",
+        arg4: str = "",
+        arg5: str = "",
+        arg6: str = "",
+        arg7: str = "",
+        arg8: str = "",
+        arg9: str = "",
+    ) -> MessageEventResult:
+        """
+        服务器标签管理。
+
+        /mctag <名称/ID> 标签1 标签2 ...
+        /mctag clear <名称/ID>
+        /mctag list
+        """
+        try:
+            group_id = event.get_group_id()
+            json_path = str(await self.get_json_path(group_id))
+            a1 = (arg1 or "").strip()
+            if not a1 or a1.lower() in ("list", "ls", "show"):
+                yield event.plain_result(await list_server_tags(json_path))
+                return
+
+            if a1.lower() in ("clear", "del", "delete", "rm", "remove"):
+                target = (arg2 or "").strip()
+                if not target:
+                    yield event.plain_result("用法：/mctag clear 服务器名称/ID")
+                    return
+                ok, msg = await clear_server_tags(json_path, target)
+                yield event.plain_result(msg)
+                return
+
+            # 其余参数拼成标签文本
+            rest_parts = [arg2, arg3, arg4, arg5, arg6, arg7, arg8, arg9]
+            rest = " ".join(p for p in rest_parts if p)
+            tags = parse_tags_argument(rest)
+            if not tags:
+                yield event.plain_result(
+                    "用法：/mctag <名称/ID> 标签1 标签2\n"
+                    "例如：/mctag 主服 生存 互通\n"
+                    "清除：/mctag clear 主服\n"
+                    "列表：/mctag list"
+                )
+                return
+            ok, msg = await set_server_tags(json_path, a1, tags)
+            yield event.plain_result(msg)
+        except Exception as e:
+            yield event.plain_result("设置标签时发生错误:" + str(e))
+
     @filter.command("mc")
     async def mcgetter(self, event: AstrMessageEvent) -> Optional[MessageEventResult]:
         """
@@ -299,6 +365,7 @@ class MyPlugin(Star):
                         last_success_time=server_info.get("last_success_time"),
                         colors=colors,
                         template=template,
+                        tags=server_info.get("tags") if isinstance(server_info.get("tags"), list) else [],
                     )
                 except Exception:
                     try:
@@ -716,6 +783,7 @@ class MyPlugin(Star):
         colors = colors if isinstance(colors, dict) else {}
         sid = str(server_id)
         server_name_color = (colors.get("server_names") or {}).get(sid)
+        tags = server_info.get("tags") if isinstance(server_info.get("tags"), list) else []
         return await get_img(
             players_list=[],
             latency=-1,
@@ -733,6 +801,7 @@ class MyPlugin(Star):
             server_name_color=server_name_color,
             player_colors=colors.get("players") or {},
             template=template,
+            tags=tags,
         )
 
     async def _update_status_safe(
@@ -753,6 +822,7 @@ class MyPlugin(Star):
         last_success_time: Any = None,
         colors: Optional[Dict[str, Any]] = None,
         template: Optional[str] = None,
+        tags: Optional[List[str]] = None,
     ) -> Optional[str]:
         """
         获取服务器信息图片（失败时返回离线卡）
@@ -765,6 +835,7 @@ class MyPlugin(Star):
             last_success_time: 上次成功查询时间戳（离线卡展示用）
             colors: 群维度颜色配置 {server_names, players}
             template: 群维度卡片主题
+            tags: 服务器标签列表
 
         Returns:
             图片的base64编码字符串；查询失败时返回离线卡，渲染彻底失败才返回None
@@ -773,6 +844,7 @@ class MyPlugin(Star):
         sid = str(server_id) if server_id is not None else None
         server_name_color = (colors.get("server_names") or {}).get(sid) if sid else None
         player_colors = colors.get("players") or {}
+        tag_list = tags if isinstance(tags, list) else []
 
         async def _offline() -> Optional[str]:
             try:
@@ -791,6 +863,7 @@ class MyPlugin(Star):
                     server_name_color=server_name_color,
                     player_colors=player_colors,
                     template=template,
+                    tags=tag_list,
                 )
             except Exception:
                 return None
@@ -828,6 +901,7 @@ class MyPlugin(Star):
                 player_colors=player_colors,
                 motd=info.get("motd") or "",
                 template=template,
+                tags=tag_list,
             )
 
         except Exception:

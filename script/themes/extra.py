@@ -13,6 +13,7 @@ from ..get_img import (
     _draw_progress,
     _latency_tone,
     _paint_chips,
+    _paint_tag_chips,
     _parse_rgb,
     _paste_rounded,
     _rounded_mask,
@@ -22,6 +23,7 @@ from ..get_img import (
     _wrap_chips,
     fetch_icon,
     load_font,
+    normalize_tags,
 )
 
 
@@ -84,18 +86,22 @@ async def render_classic(
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     W, pad = 640, 20
     is_off = online_state != "online"
     lat_c, lat_label = _latency_tone(latency if not is_off else -1)
+    tag_list = normalize_tags(tags)
     title_f = await load_font(28)
     body_f = await load_font(18)
     small_f = await load_font(15)
     chip_f = await load_font(14)
+    tag_f = await load_font(13)
     icon, lines, chip_h = await _prep(icon_base64, 72, players_list, chip_f, W - pad * 2 - 24, is_off)
     motd_h = 0 if is_off or not (motd or "").strip() else 20
+    tag_h = 26 if tag_list else 0
     content_h = 120 if is_off else 168 + motd_h + (len(lines) * (chip_h + 8) if lines else 28)
-    H = max(200, content_h + pad * 2)
+    H = max(200, content_h + pad * 2 + tag_h)
 
     img = Image.new("RGB", (W, H), (28, 30, 34))
     draw = ImageDraw.Draw(img)
@@ -118,8 +124,12 @@ async def render_classic(
     y = pad + 40
     meta = f"ID {server_id or '—'}  ·  {host or ''}".rstrip(" ·")
     draw.text((tx, y), _truncate(draw, meta, small_f, W - tx - pad), font=small_f, fill=(150, 160, 155))
+    used = _paint_tag_chips(
+        draw, tag_list, tx, y + 20, tag_f, W - tx - pad,
+        fg=(200, 240, 210), bg=(40, 55, 48), outline=accent,
+    )
 
-    y = pad + 72
+    y = pad + 72 + (used if tag_list else 0)
     if is_off:
         draw.text((tx, y), "无法连接服务器", font=body_f, fill=(255, 140, 140))
         detail = f"上次成功: {last_success_text}" if last_success_text else "请检查地址、端口或服务器是否启动"
@@ -163,20 +173,24 @@ async def render_dashboard(
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     W, pad = 680, 22
     is_off = online_state != "online"
     lat_c, _ = _latency_tone(latency if not is_off else -1)
+    tag_list = normalize_tags(tags)
     title_f = await load_font(30)
     body_f = await load_font(17)
     small_f = await load_font(14)
     metric_f = await load_font(22)
     metric_label_f = await load_font(13)
     chip_f = await load_font(14)
+    tag_f = await load_font(13)
     icon, lines, chip_h = await _prep(icon_base64, 80, players_list, chip_f, W - pad * 2 - 20, is_off, 30)
     motd_h = 0 if is_off or not (motd or "").strip() else 20
+    tag_h = 26 if tag_list else 0
     player_block = 0 if is_off else (len(lines) * (chip_h + 8) if lines else 26)
-    H = (210 if is_off else 250 + motd_h + player_block)
+    H = (210 if is_off else 250 + motd_h + player_block) + tag_h
 
     img = Image.new("RGB", (W, H), (18, 20, 28))
     draw = ImageDraw.Draw(img)
@@ -198,8 +212,12 @@ async def render_dashboard(
         font=small_f,
         fill=(140, 150, 175),
     )
+    used = _paint_tag_chips(
+        draw, tag_list, tx, pad + 66, tag_f, W - tx - pad,
+        fg=(180, 200, 255), bg=(36, 42, 62), outline=(100, 130, 200),
+    )
 
-    y = pad + 100
+    y = pad + 100 + (used if tag_list else 0)
     y += _motd_line(draw, motd, is_off, pad + 4, y - 18, small_f, W - pad * 2, (150, 160, 185))
 
     if is_off:
@@ -263,17 +281,21 @@ async def render_inventory(
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     W, pad = 620, 18
     is_off = online_state != "online"
     lat_c, _ = _latency_tone(latency if not is_off else -1)
+    tag_list = normalize_tags(tags)
     title_f = await load_font(26)
     body_f = await load_font(16)
     small_f = await load_font(14)
     chip_f = await load_font(13)
+    tag_f = await load_font(12)
     icon, lines, chip_h = await _prep(icon_base64, 64, players_list, chip_f, W - pad * 2 - 24, is_off, 20)
     motd_h = 0 if is_off or not (motd or "").strip() else 18
-    H = 210 + motd_h + (0 if is_off else (len(lines) * (chip_h + 6) if lines else 22))
+    tag_h = 22 if tag_list else 0
+    H = 210 + motd_h + tag_h + (0 if is_off else (len(lines) * (chip_h + 6) if lines else 22))
 
     img = Image.new("RGB", (W, H), (92, 64, 42))
     draw = ImageDraw.Draw(img)
@@ -303,7 +325,13 @@ async def render_inventory(
     tx = 22 + 64 + 14
     y = 62
     draw.text((tx, y), _truncate(draw, f"地址: {host or ''}", small_f, W - tx - 20), font=small_f, fill=(200, 200, 200))
-    y += 24
+    y += 22
+    used = _paint_tag_chips(
+        draw, tag_list, tx, y, tag_f, W - tx - 20,
+        fg=(255, 255, 170), bg=(50, 50, 40), outline=(100, 100, 60),
+    )
+    y += used if tag_list else 0
+    y += 4 if tag_list else 2
     if is_off:
         draw.text((tx, y), "服务器未响应", font=body_f, fill=(255, 85, 85))
         detail = f"上次成功: {last_success_text}" if last_success_text else "最后查询失败 · 可重试"
@@ -323,7 +351,7 @@ async def render_inventory(
         c = (85, 255, 85) if ratio < 0.8 else (255, 170, 0) if ratio < 0.95 else (255, 85, 85)
         draw.rectangle((bar_x + 1, bar_y + 1, bar_x + max(2, fw) - 1, bar_y + bar_h - 1), fill=c)
 
-    y = 150 + motd_h
+    y = 150 + motd_h + tag_h
     draw.text((22, y), "在线名单", font=small_f, fill=(170, 170, 170))
     y += 22
     if lines:
@@ -365,6 +393,7 @@ async def render_soft(
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     W, pad = 640, 22
     is_off = online_state != "online"
@@ -373,14 +402,17 @@ async def render_soft(
         lat_c = (20, 150, 80)
     elif lat_c == (255, 90, 90):
         lat_c = (200, 50, 50)
+    tag_list = normalize_tags(tags)
 
     title_f = await load_font(28)
     body_f = await load_font(17)
     small_f = await load_font(14)
     chip_f = await load_font(14)
+    tag_f = await load_font(13)
     icon, lines, chip_h = await _prep(icon_base64, 68, players_list, chip_f, W - pad * 2 - 16, is_off)
     motd_h = 0 if is_off or not (motd or "").strip() else 20
-    H = 220 + motd_h + (0 if is_off else (len(lines) * (chip_h + 8) if lines else 24))
+    tag_h = 26 if tag_list else 0
+    H = 220 + motd_h + tag_h + (0 if is_off else (len(lines) * (chip_h + 8) if lines else 24))
 
     img = Image.new("RGB", (W, H), (245, 247, 250))
     shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -414,8 +446,12 @@ async def render_soft(
         font=small_f,
         fill=(120, 128, 140),
     )
+    used = _paint_tag_chips(
+        draw, tag_list, tx, pad + 82, tag_f, W - tx - pad,
+        fg=(40, 100, 80), bg=(230, 245, 238), outline=(140, 200, 170),
+    )
 
-    y = pad + 100
+    y = pad + 100 + (used if tag_list else 0)
     if is_off:
         draw.rounded_rectangle((pad, y, W - pad - 8, y + 56), 12, fill=(255, 245, 245))
         draw.text((pad + 14, y + 10), "暂时连不上这台服务器", font=body_f, fill=(180, 60, 60))
@@ -463,15 +499,19 @@ async def render_compact(
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     W = 600
     is_off = online_state != "online"
     has_motd = bool((motd or "").strip()) and not is_off
-    H = 112 + (18 if has_motd else 0) if not is_off else 96
+    tag_list = normalize_tags(tags)
+    has_tags = bool(tag_list)
+    H = (112 if not is_off else 96) + (18 if has_motd else 0) + (20 if has_tags else 0)
     pad = 14
     title_f = await load_font(22)
     body_f = await load_font(14)
     small_f = await load_font(13)
+    tag_f = await load_font(12)
     icon = await fetch_icon(icon_base64)
     icon = icon.resize((56, 56), Image.Resampling.NEAREST)
     lat_c, _ = _latency_tone(latency if not is_off else -1)
@@ -485,25 +525,34 @@ async def render_compact(
 
     tx = pad + 4 + 56 + 12
     tc = _title_color(server_name_color, (240, 242, 245))
-    draw.text((tx, 14), _truncate(draw, server_name or "未知服务器", title_f, W - tx - 90), font=title_f, fill=tc)
+    draw.text((tx, 12), _truncate(draw, server_name or "未知服务器", title_f, W - tx - 90), font=title_f, fill=tc)
 
     status = "OFF" if is_off else "ON"
     sc = (200, 70, 70) if is_off else (40, 150, 90)
     sw = _text_w(draw, status, small_f) + 12
-    draw.rounded_rectangle((W - pad - sw, 16, W - pad, 34), 8, fill=sc)
-    draw.text((W - pad - sw + 6, 17), status, font=small_f, fill=(255, 255, 255))
+    draw.rounded_rectangle((W - pad - sw, 14, W - pad, 32), 8, fill=sc)
+    draw.text((W - pad - sw + 6, 15), status, font=small_f, fill=(255, 255, 255))
+
+    # meta line (ID + host) then tags
+    meta_host = f"#{server_id or '—'}  {host or ''}".strip()
+    draw.text((tx, 38), _truncate(draw, meta_host, small_f, W - tx - pad), font=small_f, fill=(140, 150, 160))
+    y = 56
+    used = _paint_tag_chips(
+        draw, tag_list, tx, y, tag_f, W - tx - pad,
+        fg=(180, 230, 200), bg=(36, 48, 42), outline=accent,
+    )
+    y += used if has_tags else 0
 
     if is_off:
-        detail = f"#{server_id or '—'}  {host or ''}  ·  连接失败"
+        detail = "连接失败"
         if last_success_text:
-            detail = f"#{server_id or '—'}  上次成功 {last_success_text}"
-        draw.text((tx, 48), _truncate(draw, detail, body_f, W - tx - pad), font=body_f, fill=(180, 140, 140))
+            detail = f"上次成功 {last_success_text}"
+        draw.text((tx, y + 2), _truncate(draw, detail, body_f, W - tx - pad), font=body_f, fill=(180, 140, 140))
         return _to_base64(img)
 
-    y = 44
     if has_motd:
         draw.text((tx, y), _truncate(draw, (motd or "").strip(), small_f, W - tx - pad), font=small_f, fill=(150, 160, 170))
-        y += 18
+        y += 16
 
     players = list(players_list or [])
     players_preview = "、".join(players[:4])
@@ -511,10 +560,10 @@ async def render_compact(
         players_preview += f" 等{plays_online}人"
     elif not players:
         players_preview = "无人在线"
-    meta1 = f"#{server_id or '—'}  {server_version}  ·  {latency}ms"
+    meta1 = f"{server_version}  ·  {latency}ms"
     draw.text((tx, y), _truncate(draw, meta1, body_f, W - tx - pad), font=body_f, fill=lat_c if latency >= 200 else (170, 178, 186))
-    draw.text((tx, y + 24), _truncate(draw, f"{plays_online}/{plays_max}  {players_preview}", body_f, W - tx - pad), font=body_f, fill=(200, 205, 210))
+    draw.text((tx, y + 18), _truncate(draw, f"{plays_online}/{plays_max}  {players_preview}", body_f, W - tx - pad), font=body_f, fill=(200, 205, 210))
 
     ratio = plays_online / plays_max if plays_max else 0
-    _draw_progress(draw, tx, H - 18, W - tx - pad, 6, ratio, (70, 190, 120), (40, 44, 50))
+    _draw_progress(draw, tx, H - 14, W - tx - pad, 6, ratio, (70, 190, 120), (40, 44, 50))
     return _to_base64(img)

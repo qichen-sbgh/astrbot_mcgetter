@@ -282,6 +282,64 @@ def _to_base64(img: Image.Image) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+def normalize_tags(tags: Optional[List[str]], limit: int = 8) -> List[str]:
+    """Normalize server tags: strip, drop empty, de-dupe (case-insensitive), cap count."""
+    if not tags:
+        return []
+    out: List[str] = []
+    seen = set()
+    for raw in tags:
+        t = str(raw).strip()
+        if not t:
+            continue
+        # 单标签过长截断，避免撑破布局
+        if len(t) > 16:
+            t = t[:15] + "…"
+        key = t.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(t)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _paint_tag_chips(
+    draw: ImageDraw.ImageDraw,
+    tags: List[str],
+    x: int,
+    y: int,
+    font,
+    max_w: int,
+    fg: Tuple[int, int, int],
+    bg: Tuple[int, int, int],
+    outline: Optional[Tuple[int, int, int]] = None,
+) -> int:
+    """
+    Draw one row of tag chips under meta. Returns vertical space used (0 if empty).
+    """
+    if not tags:
+        return 0
+    tmp = Image.new("RGB", (10, 10))
+    dtmp = ImageDraw.Draw(tmp)
+    lines, chip_h = _wrap_chips(dtmp, tags, font, max_w, max_lines=1)
+    if not lines:
+        return 0
+    yy = y
+    xx = x
+    gap = 6
+    for name in lines[0]:
+        nw = _text_w(draw, name, font) + 14
+        if outline:
+            draw.rounded_rectangle((xx, yy, xx + nw, yy + chip_h), chip_h // 2, fill=bg, outline=outline, width=1)
+        else:
+            draw.rounded_rectangle((xx, yy, xx + nw, yy + chip_h), chip_h // 2, fill=bg)
+        draw.text((xx + 7, yy + 3), name, font=font, fill=fg)
+        xx += nw + gap
+    return chip_h + 4
+
+
 # ---------------------------------------------------------------------------
 # Design F · Neon Glass
 # ---------------------------------------------------------------------------
@@ -301,6 +359,7 @@ async def generate_server_info_image(
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
     motd: Optional[str] = None,
+    tags: Optional[List[str]] = None,
 ) -> str:
     """
     Render neon-glass status card and return PNG base64.
@@ -309,6 +368,7 @@ async def generate_server_info_image(
     server_name_color: optional #RRGGBB for server title
     player_colors: optional {player_name: #RRGGBB} applied on player chips
     motd: optional plain-text server description (online only)
+    tags: optional server labels shown under ID/host
     """
     W = 660
     pad = 22
@@ -317,11 +377,13 @@ async def generate_server_info_image(
     lat_c, lat_label = _latency_tone(latency if not is_off else -1)
     title_color = _parse_rgb(server_name_color) or (240, 250, 255)
     motd_text = (motd or "").strip() if not is_off else ""
+    tag_list = normalize_tags(tags)
 
     title_f = await load_font(30)
     body_f = await load_font(17)
     small_f = await load_font(14)
     chip_f = await load_font(14)
+    tag_f = await load_font(13)
 
     icon = await fetch_icon(icon_base64)
     icon = icon.resize((76, 76), Image.Resampling.NEAREST)
@@ -333,7 +395,12 @@ async def generate_server_info_image(
     lines, chip_h = _wrap_chips(dtmp, show, chip_f, W - pad * 2 - 24, max_lines=3)
     player_block = 0 if is_off else (len(lines) * (chip_h + 8) if lines else 24)
     motd_block = 22 if motd_text else 0
-    H = (210 if is_off else 240 + motd_block + player_block)
+    # 标签行高度预估
+    tag_block = 0
+    if tag_list:
+        _, th = _wrap_chips(dtmp, tag_list, tag_f, W - (pad + 6 + 76 + 18) - pad, max_lines=1)
+        tag_block = th + 8
+    H = (210 if is_off else 240 + motd_block + player_block) + tag_block
 
     # deep background + soft glow
     img = Image.new("RGB", (W, H), (8, 10, 18))
@@ -351,9 +418,8 @@ async def generate_server_info_image(
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle((10, 10, W - 11, H - 11), 22, outline=neon, width=2)
 
-    # icon + neon ring
+    # icon only（无描边边框）
     _paste_rounded(img, icon, (pad + 6, pad + 8), 18)
-    draw.rounded_rectangle((pad + 4, pad + 6, pad + 6 + 80, pad + 6 + 80), 20, outline=neon, width=1)
 
     tx = pad + 6 + 76 + 18
     name = _truncate(draw, server_name or "未知服务器", title_f, W - tx - pad - 20)
@@ -373,7 +439,20 @@ async def generate_server_info_image(
         fill=(120, 150, 170),
     )
 
-    y = pad + 100
+    # tags: 紧跟 ID/地址下一行
+    used_tags = _paint_tag_chips(
+        draw,
+        tag_list,
+        tx,
+        pad + 72,
+        tag_f,
+        W - tx - pad,
+        fg=(180, 255, 230) if not is_off else (255, 190, 210),
+        bg=(18, 48, 48) if not is_off else (48, 24, 36),
+        outline=neon,
+    )
+
+    y = pad + 100 + (used_tags if tag_list else 0)
     if is_off:
         draw.rounded_rectangle((pad + 4, y, W - pad - 4, y + 72), 14, fill=(40, 18, 30))
         draw.text((pad + 20, y + 12), "SIGNAL LOST", font=title_f, fill=neon)
