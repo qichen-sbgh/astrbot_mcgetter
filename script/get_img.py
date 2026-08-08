@@ -264,6 +264,7 @@ async def generate_server_info_image(
     last_success_text: Optional[str] = None,
     server_name_color: Optional[str] = None,
     player_colors: Optional[Dict[str, str]] = None,
+    motd: Optional[str] = None,
 ) -> str:
     """
     Render neon-glass status card and return PNG base64.
@@ -271,6 +272,7 @@ async def generate_server_info_image(
     online_state: "online" | "offline"
     server_name_color: optional #RRGGBB for server title
     player_colors: optional {player_name: #RRGGBB} applied on player chips
+    motd: optional plain-text server description (online only)
     """
     W = 660
     pad = 22
@@ -278,6 +280,7 @@ async def generate_server_info_image(
     neon = (0, 255, 200) if not is_off else (255, 80, 140)
     lat_c, lat_label = _latency_tone(latency if not is_off else -1)
     title_color = _parse_rgb(server_name_color) or (240, 250, 255)
+    motd_text = (motd or "").strip() if not is_off else ""
 
     title_f = await load_font(30)
     body_f = await load_font(17)
@@ -293,7 +296,8 @@ async def generate_server_info_image(
     show = [] if is_off else list(players_list or [])[:22]
     lines, chip_h = _wrap_chips(dtmp, show, chip_f, W - pad * 2 - 24, max_lines=3)
     player_block = 0 if is_off else (len(lines) * (chip_h + 8) if lines else 24)
-    H = (210 if is_off else 240 + player_block)
+    motd_block = 22 if motd_text else 0
+    H = (210 if is_off else 240 + motd_block + player_block)
 
     # deep background + soft glow
     img = Image.new("RGB", (W, H), (8, 10, 18))
@@ -342,6 +346,16 @@ async def generate_server_info_image(
             detail = f"上次成功: {last_success_text}"
         draw.text((pad + 20, y + 48), _truncate(draw, detail, small_f, W - pad * 2 - 40), font=small_f, fill=(200, 160, 180))
         return _to_base64(img)
+
+    # MOTD one-liner under header
+    if motd_text:
+        draw.text(
+            (pad + 8, y - 6),
+            _truncate(draw, motd_text, small_f, W - pad * 2 - 16),
+            font=small_f,
+            fill=(150, 180, 195),
+        )
+        y += motd_block
 
     # stat tiles
     stats = [

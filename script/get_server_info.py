@@ -5,10 +5,62 @@ import socket
 import base64
 from pathlib import Path
 import re
+from typing import Any
 from astrbot.api import logger
 
 csu_host = 'csu-mc.org'
 csu_get_players = 'https://map.magicalsheep.cn/tiles/players.json'
+
+# Minecraft 颜色/格式码：§x 以及部分 JSON 组件残留空白
+_MOTD_SECTION_RE = re.compile(r"§.")
+_MOTD_WS_RE = re.compile(r"\s+")
+
+
+def _extract_motd_text(description: Any) -> str:
+    """
+    将 mcstatus 的 description 转为单行纯文本 MOTD。
+    兼容 str / dict / 带 to_plain 的对象。
+    """
+    if description is None:
+        return ""
+
+    text = ""
+    try:
+        if hasattr(description, "to_plain") and callable(description.to_plain):
+            text = description.to_plain()
+        elif isinstance(description, dict):
+            # JSON chat component: {"text": "...", "extra": [...]}
+            parts: list[str] = []
+
+            def _walk(node: Any) -> None:
+                if node is None:
+                    return
+                if isinstance(node, str):
+                    parts.append(node)
+                    return
+                if isinstance(node, dict):
+                    if "text" in node and node["text"] is not None:
+                        parts.append(str(node["text"]))
+                    extra = node.get("extra")
+                    if isinstance(extra, list):
+                        for child in extra:
+                            _walk(child)
+                elif isinstance(node, list):
+                    for child in node:
+                        _walk(child)
+
+            _walk(description)
+            text = "".join(parts)
+        else:
+            text = str(description)
+    except Exception as e:
+        logger.warning(f"解析 MOTD 失败: {e}")
+        text = ""
+
+    text = _MOTD_SECTION_RE.sub("", text)
+    text = text.replace("\r", " ").replace("\n", " ")
+    text = _MOTD_WS_RE.sub(" ", text).strip()
+    return text
 
 
 async def get_server_status(host):
@@ -22,6 +74,7 @@ async def get_server_status(host):
         plays_max = status.players.max
         plays_online = status.players.online
         server_version = status.version.name
+        motd = _extract_motd_text(getattr(status, "description", None))
 
         # 保存服务器图标
         if status.icon:
@@ -55,6 +108,7 @@ async def get_server_status(host):
             "plays_online": plays_online,  # 在线玩家数
             "server_version": server_version,  # 服务器游戏版本
             "icon_base64": icon_data,  # 服务器图标base64
+            "motd": motd,  # 服务器 MOTD 纯文本
         }
 
     except (socket.gaierror, ConnectionRefusedError) as e:

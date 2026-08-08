@@ -772,6 +772,7 @@ class MyPlugin(Star):
                 online_state="online",
                 server_name_color=server_name_color,
                 player_colors=player_colors,
+                motd=info.get("motd") or "",
             )
 
         except Exception:
