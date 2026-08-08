@@ -52,7 +52,7 @@ HELP_INFO = """
 --列出所有服务器及其ID
 
 /mccleanup
---手动触发自动清理（删除10天未查询成功的服务器）
+--手动触发自动清理（删除长期未查询成功的服务器，天数见插件配置 auto_cleanup_days）
 
 /mcbind 服务器ID
 --为指定服务器绑定数据压缩包（zip）
@@ -265,10 +265,13 @@ class MyPlugin(Star):
                 yield event.plain_result("请先使用 /mcadd 添加服务器")
                 return
             
-            # 执行自动清理
-            deleted_servers = await auto_cleanup_servers(json_path)
+            # 执行自动清理（天数来自插件配置）
+            cleanup_days = self._get_cleanup_days()
+            deleted_servers = await auto_cleanup_servers(json_path, days=cleanup_days)
             if deleted_servers:
-                cleanup_message = "自动清理完成，以下服务器因10天未查询成功已被删除:\n"
+                cleanup_message = (
+                    f"自动清理完成，以下服务器因{cleanup_days}天未查询成功已被删除:\n"
+                )
                 for server in deleted_servers:
                     last_success_date = datetime.fromtimestamp(server['last_success_time']).strftime('%Y-%m-%d %H:%M:%S')
                     cleanup_message += f"• {server['name']} (ID: {server['id']}) - 地址: {server['host']} - 最后成功: {last_success_date}\n"
@@ -663,15 +666,21 @@ class MyPlugin(Star):
     @filter.command("mccleanup")
     async def mccleanup(self, event: AstrMessageEvent) -> MessageEventResult:
         """
-        手动触发自动清理（删除10天未查询成功的服务器）
+        手动触发自动清理（删除长期未查询成功的服务器）
         """
         try:
             group_id = event.get_group_id()
             json_path = await self.get_json_path(group_id)
-            
-            deleted_servers = await auto_cleanup_servers(json_path)
+            cleanup_days = self._get_cleanup_days()
+            if cleanup_days <= 0:
+                yield event.plain_result("自动清理已关闭（插件配置 auto_cleanup_days <= 0）")
+                return
+
+            deleted_servers = await auto_cleanup_servers(json_path, days=cleanup_days)
             if deleted_servers:
-                cleanup_message = "自动清理完成，以下服务器因10天未查询成功已被删除:\n"
+                cleanup_message = (
+                    f"自动清理完成，以下服务器因{cleanup_days}天未查询成功已被删除:\n"
+                )
                 for server in deleted_servers:
                     last_success_date = datetime.fromtimestamp(server['last_success_time']).strftime('%Y-%m-%d %H:%M:%S')
                     cleanup_message += f"• {server['name']} (ID: {server['id']}) - 地址: {server['host']} - 最后成功: {last_success_date}\n"
@@ -681,6 +690,14 @@ class MyPlugin(Star):
                 
         except Exception as e:
             yield event.plain_result("自动清理时发生错误:"+str(e))
+
+    def _get_cleanup_days(self) -> int:
+        """Read auto_cleanup_days from plugin config; default 10."""
+        raw = self._get_plugin_config_value("auto_cleanup_days", 10)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 10
 
     def _format_last_success(self, last_success_time: Any) -> Optional[str]:
         """Format last successful query timestamp for offline cards."""

@@ -398,17 +398,26 @@ async def update_server_status(json_path: str, identifier: str, success: bool) -
         logger.error(f"更新服务器状态失败: {e}")
         return False
 
-async def auto_cleanup_servers(json_path: str) -> List[Dict[str, Any]]:
+async def auto_cleanup_servers(
+    json_path: str,
+    days: Optional[int] = None,
+) -> List[Dict[str, Any]]:
     """
     自动清理长时间未查询成功的服务器
 
     Args:
         json_path: JSON文件路径
+        days: 清理阈值天数；None 使用 AUTO_CLEANUP_DAYS；<=0 关闭清理
 
     Returns:
         List[Dict[str, Any]]: 被删除的服务器列表
     """
     try:
+        cleanup_days = AUTO_CLEANUP_DAYS if days is None else int(days)
+        if cleanup_days <= 0:
+            logger.info("自动清理已关闭（days<=0）")
+            return []
+
         data = await read_json(json_path)
         servers = data.get("servers", {})
         
@@ -416,7 +425,7 @@ async def auto_cleanup_servers(json_path: str) -> List[Dict[str, Any]]:
             return []
         
         current_time = int(time.time())
-        cutoff_time = current_time - (AUTO_CLEANUP_DAYS * 24 * 3600)  # 10天前的时间戳
+        cutoff_time = current_time - (cleanup_days * 24 * 3600)
         deleted_servers = []
         
         # 检查每个服务器
