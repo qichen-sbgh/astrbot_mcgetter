@@ -21,6 +21,9 @@ from datetime import datetime
 from time import localtime, strftime
 
 # 常量定义
+# 单台服务器状态查询超时（秒）；超时按离线卡处理
+QUERY_TIMEOUT_SEC = 8.0
+
 HELP_INFO = """
 /mchelp 
 --查看帮助
@@ -97,6 +100,8 @@ class MyPlugin(Star):
         self.plugin_config = config or {}
         self.mcbind_service = McBindService()
         self.mcq_service = McqService()
+        # 并发 /mc 时串行写群 JSON，避免 last_success 等状态互相覆盖
+        self._status_update_lock = asyncio.Lock()
 
     @filter.command("mchelp")
     async def get_help(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -246,47 +251,41 @@ class MyPlugin(Star):
                     yield event.plain_result("所有服务器已被清理，请重新添加服务器")
                     return
             
-            message_chain: List[Comp.Image] = []
             servers = json_data.get("servers", {})
             colors = json_data.get("colors") if isinstance(json_data.get("colors"), dict) else {}
-            
-            for server_id, server_info in servers.items():
+            server_items = list(servers.items())
+
+            async def _query_one(server_id: Any, server_info: Dict[str, Any]) -> Optional[str]:
+                """单服查询；失败时尽量返回离线卡 base64。"""
                 try:
-                    mcinfo_img = await self.get_img(
-                        server_info['name'],
-                        server_info['host'],
+                    return await self.get_img(
+                        server_info["name"],
+                        server_info["host"],
                         server_id,
                         str(json_path),
                         last_success_time=server_info.get("last_success_time"),
                         colors=colors,
                     )
-                    if mcinfo_img:
-                        message_chain.append(Comp.Image.fromBase64(mcinfo_img))
                 except Exception:
-                    # 渲染异常时尽量补一张离线卡，避免整轮静默丢失
                     try:
-                        sid = str(server_id)
-                        server_name_color = (colors.get("server_names") or {}).get(sid)
-                        offline_img = await get_img(
-                            players_list=[],
-                            latency=-1,
-                            server_name=server_info.get("name", "未知服务器"),
-                            plays_max=0,
-                            plays_online=0,
-                            server_version="—",
-                            icon_base64=None,
-                            server_id=sid,
-                            host=server_info.get("host", ""),
-                            online_state="offline",
-                            last_success_text=self._format_last_success(
-                                server_info.get("last_success_time")
-                            ),
-                            server_name_color=server_name_color,
-                            player_colors=colors.get("players") or {},
+                        return await self._offline_card_base64(
+                            server_id=server_id,
+                            server_info=server_info,
+                            colors=colors,
                         )
-                        message_chain.append(Comp.Image.fromBase64(offline_img))
                     except Exception:
-                        continue
+                        return None
+
+            # 并行查询所有服务器，保持与 server_items 相同的输出顺序
+            results = await asyncio.gather(
+                *[_query_one(sid, info) for sid, info in server_items],
+                return_exceptions=False,
+            )
+
+            message_chain: List[Comp.Image] = []
+            for img_b64 in results:
+                if isinstance(img_b64, str) and img_b64:
+                    message_chain.append(Comp.Image.fromBase64(img_b64))
 
             if message_chain:
                 yield event.chain_result(message_chain)
@@ -657,6 +656,43 @@ class MyPlugin(Star):
             return strftime('%Y-%m-%d %H:%M:%S', localtime(last_success_time))
         return None
 
+    async def _offline_card_base64(
+        self,
+        server_id: Any,
+        server_info: Dict[str, Any],
+        colors: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """渲染单张离线卡，供并发查询失败回退使用。"""
+        colors = colors if isinstance(colors, dict) else {}
+        sid = str(server_id)
+        server_name_color = (colors.get("server_names") or {}).get(sid)
+        return await get_img(
+            players_list=[],
+            latency=-1,
+            server_name=server_info.get("name", "未知服务器"),
+            plays_max=0,
+            plays_online=0,
+            server_version="—",
+            icon_base64=None,
+            server_id=sid,
+            host=server_info.get("host", ""),
+            online_state="offline",
+            last_success_text=self._format_last_success(
+                server_info.get("last_success_time")
+            ),
+            server_name_color=server_name_color,
+            player_colors=colors.get("players") or {},
+        )
+
+    async def _update_status_safe(
+        self, json_path: Optional[str], server_id: Optional[Any], success: bool
+    ) -> None:
+        """在锁内更新服务器查询状态，避免并发 /mc 写坏群配置。"""
+        if not json_path or server_id is None:
+            return
+        async with self._status_update_lock:
+            await update_server_status(json_path, server_id, success)
+
     async def get_img(
         self,
         server_name: str,
@@ -685,48 +721,7 @@ class MyPlugin(Star):
         server_name_color = (colors.get("server_names") or {}).get(sid) if sid else None
         player_colors = colors.get("players") or {}
 
-        try:
-            info = await get_server_status(host)
-            if not info:
-                if json_path and server_id:
-                    await update_server_status(json_path, server_id, False)
-                return await get_img(
-                    players_list=[],
-                    latency=-1,
-                    server_name=server_name,
-                    plays_max=0,
-                    plays_online=0,
-                    server_version="—",
-                    icon_base64=None,
-                    server_id=sid,
-                    host=host,
-                    online_state="offline",
-                    last_success_text=self._format_last_success(last_success_time),
-                    server_name_color=server_name_color,
-                    player_colors=player_colors,
-                )
-
-            if json_path and server_id:
-                await update_server_status(json_path, server_id, True)
-
-            return await get_img(
-                players_list=info['players_list'],
-                latency=info['latency'],
-                server_name=server_name,
-                plays_max=info['plays_max'],
-                plays_online=info['plays_online'],
-                server_version=info['server_version'],
-                icon_base64=info['icon_base64'],
-                server_id=sid,
-                host=host,
-                online_state="online",
-                server_name_color=server_name_color,
-                player_colors=player_colors,
-            )
-
-        except Exception:
-            if json_path and server_id:
-                await update_server_status(json_path, server_id, False)
+        async def _offline() -> Optional[str]:
             try:
                 return await get_img(
                     players_list=[],
@@ -745,6 +740,43 @@ class MyPlugin(Star):
                 )
             except Exception:
                 return None
+
+        try:
+            try:
+                info = await asyncio.wait_for(
+                    get_server_status(host),
+                    timeout=QUERY_TIMEOUT_SEC,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "查询服务器超时(%.1fs): %s (%s)", QUERY_TIMEOUT_SEC, server_name, host
+                )
+                info = None
+
+            if not info:
+                await self._update_status_safe(json_path, server_id, False)
+                return await _offline()
+
+            await self._update_status_safe(json_path, server_id, True)
+
+            return await get_img(
+                players_list=info['players_list'],
+                latency=info['latency'],
+                server_name=server_name,
+                plays_max=info['plays_max'],
+                plays_online=info['plays_online'],
+                server_version=info['server_version'],
+                icon_base64=info['icon_base64'],
+                server_id=sid,
+                host=host,
+                online_state="online",
+                server_name_color=server_name_color,
+                player_colors=player_colors,
+            )
+
+        except Exception:
+            await self._update_status_safe(json_path, server_id, False)
+            return await _offline()
 
     async def get_json_path(self, group_id: str) -> Path:
         """
