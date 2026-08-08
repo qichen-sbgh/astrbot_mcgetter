@@ -9,9 +9,11 @@ from .script.template_selector import write_config, get_img
 from .script.mcbind_service import McBindService
 from .script.mcq_service import McqService
 from .script.json_operate import (
-    read_json, add_data, del_data, update_data, 
+    read_json, add_data, del_data, update_data,
     get_all_servers, get_server_info, get_server_by_name,
-    update_server_status, auto_cleanup_servers
+    update_server_status, auto_cleanup_servers,
+    set_server_name_color, set_player_name_color,
+    clear_server_name_color, clear_player_name_color, list_colors,
 )
 import asyncio
 import re
@@ -63,6 +65,21 @@ HELP_INFO = """
 
 /mctem
 --切换图片渲染模板
+
+/mccolor server 服务器名称/ID 颜色
+--设置该服务器在卡片上的名称颜色
+
+/mccolor player 玩家名 颜色
+--设置玩家名称颜色（本群所有服务器卡片生效）
+
+/mccolor list
+--查看已设置的颜色
+
+/mccolor clear server 服务器名称/ID
+/mccolor clear player 玩家名
+--清除已设置的颜色
+
+--颜色格式: #RRGGBB / #RGB / R,G,B  例如 #00FFC8 或 255,85,255
 """
 
 @register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.6.0")
@@ -104,6 +121,94 @@ class MyPlugin(Star):
         else:
             yield event.plain_result("模板配置文件写入失败")
 
+    @filter.command("mccolor")
+    async def mccolor(
+        self,
+        event: AstrMessageEvent,
+        action: str = "list",
+        arg1: str = "",
+        arg2: str = "",
+        arg3: str = "",
+    ) -> MessageEventResult:
+        """
+        设置渲染颜色。
+
+        /mccolor server <名称/ID> <颜色>
+        /mccolor player <玩家名> <颜色>
+        /mccolor list
+        /mccolor clear server <名称/ID>
+        /mccolor clear player <玩家名>
+        """
+        try:
+            group_id = event.get_group_id()
+            json_path = str(await self.get_json_path(group_id))
+            action = (action or "list").strip().lower()
+
+            if action in ("list", "ls", "show", ""):
+                yield event.plain_result(await list_colors(json_path))
+                return
+
+            if action == "server":
+                if not arg1 or not arg2:
+                    yield event.plain_result("用法：/mccolor server 服务器名称/ID 颜色\n例如：/mccolor server 主服 #00FFC8")
+                    return
+                ok, msg = await set_server_name_color(json_path, arg1, arg2)
+                yield event.plain_result(msg)
+                return
+
+            if action == "player":
+                if not arg1 or not arg2:
+                    yield event.plain_result("用法：/mccolor player 玩家名 颜色\n例如：/mccolor player Steve #FF55FF")
+                    return
+                ok, msg = await set_player_name_color(json_path, arg1, arg2)
+                yield event.plain_result(msg)
+                return
+
+            if action == "clear":
+                target = (arg1 or "").strip().lower()
+                name = arg2
+                if target == "server":
+                    if not name:
+                        yield event.plain_result("用法：/mccolor clear server 服务器名称/ID")
+                        return
+                    ok, msg = await clear_server_name_color(json_path, name)
+                    yield event.plain_result(msg)
+                    return
+                if target == "player":
+                    if not name:
+                        yield event.plain_result("用法：/mccolor clear player 玩家名")
+                        return
+                    ok, msg = await clear_player_name_color(json_path, name)
+                    yield event.plain_result(msg)
+                    return
+                yield event.plain_result("用法：/mccolor clear server|player 名称")
+                return
+
+            # 兼容：/mccolor del server|player ...
+            if action in ("del", "delete", "remove", "rm"):
+                target = (arg1 or "").strip().lower()
+                name = arg2
+                if target == "server" and name:
+                    ok, msg = await clear_server_name_color(json_path, name)
+                    yield event.plain_result(msg)
+                    return
+                if target == "player" and name:
+                    ok, msg = await clear_player_name_color(json_path, name)
+                    yield event.plain_result(msg)
+                    return
+                yield event.plain_result("用法：/mccolor clear server|player 名称")
+                return
+
+            yield event.plain_result(
+                "未知子命令。可用：\n"
+                "/mccolor server 服务器 颜色\n"
+                "/mccolor player 玩家名 颜色\n"
+                "/mccolor list\n"
+                "/mccolor clear server|player 名称"
+            )
+        except Exception as e:
+            yield event.plain_result("设置颜色时发生错误:" + str(e))
+
     @filter.command("mc")
     async def mcgetter(self, event: AstrMessageEvent) -> Optional[MessageEventResult]:
         """
@@ -143,6 +248,7 @@ class MyPlugin(Star):
             
             message_chain: List[Comp.Image] = []
             servers = json_data.get("servers", {})
+            colors = json_data.get("colors") if isinstance(json_data.get("colors"), dict) else {}
             
             for server_id, server_info in servers.items():
                 try:
@@ -152,12 +258,15 @@ class MyPlugin(Star):
                         server_id,
                         str(json_path),
                         last_success_time=server_info.get("last_success_time"),
+                        colors=colors,
                     )
                     if mcinfo_img:
                         message_chain.append(Comp.Image.fromBase64(mcinfo_img))
                 except Exception:
                     # 渲染异常时尽量补一张离线卡，避免整轮静默丢失
                     try:
+                        sid = str(server_id)
+                        server_name_color = (colors.get("server_names") or {}).get(sid)
                         offline_img = await get_img(
                             players_list=[],
                             latency=-1,
@@ -166,12 +275,14 @@ class MyPlugin(Star):
                             plays_online=0,
                             server_version="—",
                             icon_base64=None,
-                            server_id=str(server_id),
+                            server_id=sid,
                             host=server_info.get("host", ""),
                             online_state="offline",
                             last_success_text=self._format_last_success(
                                 server_info.get("last_success_time")
                             ),
+                            server_name_color=server_name_color,
+                            player_colors=colors.get("players") or {},
                         )
                         message_chain.append(Comp.Image.fromBase64(offline_img))
                     except Exception:
@@ -553,6 +664,7 @@ class MyPlugin(Star):
         server_id: Optional[str] = None,
         json_path: Optional[str] = None,
         last_success_time: Any = None,
+        colors: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
         """
         获取服务器信息图片（霓虹玻璃默认卡；失败时返回离线卡）
@@ -563,10 +675,16 @@ class MyPlugin(Star):
             server_id: 服务器ID（可选）
             json_path: JSON文件路径（用于更新状态）
             last_success_time: 上次成功查询时间戳（离线卡展示用）
+            colors: 群维度颜色配置 {server_names, players}
 
         Returns:
             图片的base64编码字符串；查询失败时返回离线卡，渲染彻底失败才返回None
         """
+        colors = colors if isinstance(colors, dict) else {}
+        sid = str(server_id) if server_id is not None else None
+        server_name_color = (colors.get("server_names") or {}).get(sid) if sid else None
+        player_colors = colors.get("players") or {}
+
         try:
             info = await get_server_status(host)
             if not info:
@@ -580,10 +698,12 @@ class MyPlugin(Star):
                     plays_online=0,
                     server_version="—",
                     icon_base64=None,
-                    server_id=str(server_id) if server_id is not None else None,
+                    server_id=sid,
                     host=host,
                     online_state="offline",
                     last_success_text=self._format_last_success(last_success_time),
+                    server_name_color=server_name_color,
+                    player_colors=player_colors,
                 )
 
             if json_path and server_id:
@@ -597,9 +717,11 @@ class MyPlugin(Star):
                 plays_online=info['plays_online'],
                 server_version=info['server_version'],
                 icon_base64=info['icon_base64'],
-                server_id=str(server_id) if server_id is not None else None,
+                server_id=sid,
                 host=host,
                 online_state="online",
+                server_name_color=server_name_color,
+                player_colors=player_colors,
             )
 
         except Exception:
@@ -614,10 +736,12 @@ class MyPlugin(Star):
                     plays_online=0,
                     server_version="—",
                     icon_base64=None,
-                    server_id=str(server_id) if server_id is not None else None,
+                    server_id=sid,
                     host=host,
                     online_state="offline",
                     last_success_text=self._format_last_success(last_success_time),
+                    server_name_color=server_name_color,
+                    player_colors=player_colors,
                 )
             except Exception:
                 return None

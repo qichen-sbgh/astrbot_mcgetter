@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 from .get_img import generate_server_info_image
 from astrbot.api.star import StarTools
 import importlib.util
@@ -27,6 +27,8 @@ async def get_img(
     host: Optional[str] = None,
     online_state: str = "online",
     last_success_text: Optional[str] = None,
+    server_name_color: Optional[str] = None,
+    player_colors: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     生成服务器信息图片并返回 base64 字符串。
@@ -46,6 +48,8 @@ async def get_img(
             host=host,
             online_state=online_state,
             last_success_text=last_success_text,
+            server_name_color=server_name_color,
+            player_colors=player_colors,
         )
 
     # 尝试加载自定义模板
@@ -58,6 +62,7 @@ async def get_img(
                 server_version, icon_base64,
                 server_id=server_id, host=host,
                 online_state=online_state, last_success_text=last_success_text,
+                server_name_color=server_name_color, player_colors=player_colors,
             )
 
         # 动态加载模板模块
@@ -70,6 +75,7 @@ async def get_img(
                 server_version, icon_base64,
                 server_id=server_id, host=host,
                 online_state=online_state, last_success_text=last_success_text,
+                server_name_color=server_name_color, player_colors=player_colors,
             )
 
         module = importlib.util.module_from_spec(spec)
@@ -84,6 +90,7 @@ async def get_img(
                 server_version, icon_base64,
                 server_id=server_id, host=host,
                 online_state=online_state, last_success_text=last_success_text,
+                server_name_color=server_name_color, player_colors=player_colors,
             )
 
         # 自定义模板保持旧签名，避免破坏兼容
@@ -105,6 +112,7 @@ async def get_img(
                 server_version, icon_base64,
                 server_id=server_id, host=host,
                 online_state=online_state, last_success_text=last_success_text,
+                server_name_color=server_name_color, player_colors=player_colors,
             )
 
         return result
@@ -116,6 +124,7 @@ async def get_img(
             server_version, icon_base64,
             server_id=server_id, host=host,
             online_state=online_state, last_success_text=last_success_text,
+            server_name_color=server_name_color, player_colors=player_colors,
         )
 
 
@@ -131,6 +140,8 @@ async def _generate_default_image(
     host: Optional[str] = None,
     online_state: str = "online",
     last_success_text: Optional[str] = None,
+    server_name_color: Optional[str] = None,
+    player_colors: Optional[Dict[str, str]] = None,
 ) -> str:
     """生成默认服务器信息图片的辅助函数。"""
     return await generate_server_info_image(
@@ -145,6 +156,8 @@ async def _generate_default_image(
         host=host,
         online_state=online_state,
         last_success_text=last_success_text,
+        server_name_color=server_name_color,
+        player_colors=player_colors,
     )
 
 

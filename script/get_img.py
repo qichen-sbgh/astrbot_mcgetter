@@ -7,7 +7,7 @@ from __future__ import annotations
 import base64
 import io
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
@@ -174,6 +174,46 @@ def _wrap_chips(
     return lines, chip_h
 
 
+def _parse_rgb(color: Optional[str]) -> Optional[Tuple[int, int, int]]:
+    """Parse #RGB / #RRGGBB / RRGGBB into RGB."""
+    if not color or not isinstance(color, str):
+        return None
+    s = color.strip()
+    if s.startswith("#"):
+        s = s[1:]
+    try:
+        if len(s) == 3 and all(c in "0123456789abcdefABCDEF" for c in s):
+            return int(s[0] * 2, 16), int(s[1] * 2, 16), int(s[2] * 2, 16)
+        if len(s) == 6 and all(c in "0123456789abcdefABCDEF" for c in s):
+            return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    except ValueError:
+        return None
+    return None
+
+
+def _lookup_player_color(
+    name: str,
+    player_colors: Optional[Dict[str, str]],
+) -> Optional[Tuple[int, int, int]]:
+    if not player_colors or name.startswith("+"):
+        return None
+    if name in player_colors:
+        return _parse_rgb(player_colors[name])
+    lower = name.lower()
+    for key, value in player_colors.items():
+        if key.lower() == lower:
+            return _parse_rgb(value)
+    return None
+
+
+def _chip_bg_from_fg(fg: Tuple[int, int, int]) -> Tuple[int, int, int]:
+    return (
+        max(16, min(70, fg[0] // 4 + 12)),
+        max(16, min(70, fg[1] // 4 + 12)),
+        max(16, min(70, fg[2] // 4 + 12)),
+    )
+
+
 def _paint_chips(
     draw: ImageDraw.ImageDraw,
     lines: List[List[str]],
@@ -184,14 +224,18 @@ def _paint_chips(
     fg: Tuple[int, int, int],
     bg: Tuple[int, int, int],
     gap: int = 8,
+    player_colors: Optional[Dict[str, str]] = None,
 ) -> None:
     yy = y
     for line in lines:
         xx = x
         for name in line:
+            custom = _lookup_player_color(name, player_colors)
+            text_fg = custom or fg
+            chip_bg = _chip_bg_from_fg(custom) if custom else bg
             nw = _text_w(draw, name, font) + 16
-            draw.rounded_rectangle((xx, yy, xx + nw, yy + chip_h), chip_h // 2, fill=bg)
-            draw.text((xx + 8, yy + 4), name, font=font, fill=fg)
+            draw.rounded_rectangle((xx, yy, xx + nw, yy + chip_h), chip_h // 2, fill=chip_bg)
+            draw.text((xx + 8, yy + 4), name, font=font, fill=text_fg)
             xx += nw + gap
         yy += chip_h + gap
 
@@ -218,17 +262,22 @@ async def generate_server_info_image(
     host: Optional[str] = None,
     online_state: str = "online",
     last_success_text: Optional[str] = None,
+    server_name_color: Optional[str] = None,
+    player_colors: Optional[Dict[str, str]] = None,
 ) -> str:
     """
     Render neon-glass status card and return PNG base64.
 
     online_state: "online" | "offline"
+    server_name_color: optional #RRGGBB for server title
+    player_colors: optional {player_name: #RRGGBB} applied on player chips
     """
     W = 660
     pad = 22
     is_off = online_state != "online"
     neon = (0, 255, 200) if not is_off else (255, 80, 140)
     lat_c, lat_label = _latency_tone(latency if not is_off else -1)
+    title_color = _parse_rgb(server_name_color) or (240, 250, 255)
 
     title_f = await load_font(30)
     body_f = await load_font(17)
@@ -268,7 +317,7 @@ async def generate_server_info_image(
 
     tx = pad + 6 + 76 + 18
     name = _truncate(draw, server_name or "未知服务器", title_f, W - tx - pad - 20)
-    draw.text((tx, pad + 12), name, font=title_f, fill=(240, 250, 255))
+    draw.text((tx, pad + 12), name, font=title_f, fill=title_color)
 
     # meta: ID // host
     id_part = f"ID {server_id}" if server_id not in (None, "") else "ID —"
@@ -313,7 +362,11 @@ async def generate_server_info_image(
     y += 22
 
     if lines:
-        _paint_chips(draw, lines, pad + 4, y, chip_h, chip_f, (220, 255, 250), (24, 40, 48))
+        _paint_chips(
+            draw, lines, pad + 4, y, chip_h, chip_f,
+            (220, 255, 250), (24, 40, 48),
+            player_colors=player_colors,
+        )
     else:
         draw.text((pad + 8, y), "EMPTY LOBBY", font=body_f, fill=(100, 130, 140))
 

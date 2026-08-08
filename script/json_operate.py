@@ -12,12 +12,17 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 配置版本常量
-CURRENT_VERSION = "2.1"
+CURRENT_VERSION = "2.2"
 DEFAULT_CONFIG = {
     "version": CURRENT_VERSION,
     "next_id": 1,
     "servers": {},
-    "last_cleanup": None
+    "last_cleanup": None,
+    # 群维度渲染颜色：server_names 按服务器 ID；players 按玩家名（跨服生效）
+    "colors": {
+        "server_names": {},
+        "players": {},
+    },
 }
 
 # 自动清理配置
@@ -137,6 +142,7 @@ async def read_json(json_path: str) -> Dict[str, Any]:
                 data["next_id"] = 1
             if "servers" not in data:
                 data["servers"] = {}
+            data = ensure_colors_section(data)
             
             logger.info(f"成功读取JSON文件: {json_path}, 数据: {data}")
             return data
@@ -241,6 +247,8 @@ async def del_data(json_path: str, identifier: str) -> bool:
         if identifier in servers:
             server_info = servers[identifier]
             del servers[identifier]
+            data = ensure_colors_section(data)
+            data.get("colors", {}).get("server_names", {}).pop(str(identifier), None)
             await write_json(json_path, data)
             logger.info(f"成功删除服务器数据: {server_info['name']} (ID: {identifier})")
             return True
@@ -250,6 +258,8 @@ async def del_data(json_path: str, identifier: str) -> bool:
         if existing_server:
             server_id, server_info = existing_server
             del servers[server_id]
+            data = ensure_colors_section(data)
+            data.get("colors", {}).get("server_names", {}).pop(str(server_id), None)
             await write_json(json_path, data)
             logger.info(f"成功删除服务器数据: {server_info['name']} (ID: {server_id})")
             return True
@@ -416,8 +426,11 @@ async def auto_cleanup_servers(json_path: str) -> List[Dict[str, Any]]:
                 servers_to_delete.append((server_id, server_info))
         
         # 删除标记的服务器
+        data = ensure_colors_section(data)
+        server_name_colors = data["colors"]["server_names"]
         for server_id, server_info in servers_to_delete:
             del servers[server_id]
+            server_name_colors.pop(str(server_id), None)
             deleted_servers.append({
                 "id": server_id,
                 "name": server_info["name"],
@@ -466,3 +479,168 @@ async def get_server_info(json_path: str, identifier: str) -> Optional[Dict[str,
     except Exception as e:
         logger.error(f"获取服务器信息失败: {e}")
         return None
+
+
+def ensure_colors_section(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Ensure colors.server_names / colors.players exist on config dict."""
+    colors = data.get("colors")
+    if not isinstance(colors, dict):
+        colors = {}
+        data["colors"] = colors
+    if not isinstance(colors.get("server_names"), dict):
+        colors["server_names"] = {}
+    if not isinstance(colors.get("players"), dict):
+        colors["players"] = {}
+    return data
+
+
+def parse_color_to_hex(color: str) -> Optional[str]:
+    """
+    Parse user color input to canonical #RRGGBB.
+    Supports: #RGB, #RRGGBB, RRGGBB, R,G,B
+    """
+    if not color or not isinstance(color, str):
+        return None
+    s = color.strip()
+    if not s:
+        return None
+
+    # R,G,B
+    if "," in s:
+        parts = [p.strip() for p in s.split(",")]
+        if len(parts) == 3 and all(p.isdigit() for p in parts):
+            r, g, b = (int(parts[0]), int(parts[1]), int(parts[2]))
+            if all(0 <= v <= 255 for v in (r, g, b)):
+                return f"#{r:02X}{g:02X}{b:02X}"
+        return None
+
+    if s.startswith("#"):
+        s = s[1:]
+    if len(s) == 3 and all(c in "0123456789abcdefABCDEF" for c in s):
+        r, g, b = (int(s[0] * 2, 16), int(s[1] * 2, 16), int(s[2] * 2, 16))
+        return f"#{r:02X}{g:02X}{b:02X}"
+    if len(s) == 6 and all(c in "0123456789abcdefABCDEF" for c in s):
+        return f"#{s.upper()}"
+    return None
+
+
+def hex_to_rgb(color_hex: str) -> Optional[Tuple[int, int, int]]:
+    """Convert #RRGGBB / RRGGBB to RGB tuple."""
+    normalized = parse_color_to_hex(color_hex)
+    if not normalized:
+        return None
+    s = normalized[1:]
+    return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+
+
+def resolve_server_id(data: Dict[str, Any], identifier: str) -> Optional[str]:
+    """Resolve server name or ID to string ID."""
+    servers = data.get("servers", {})
+    if identifier in servers:
+        return identifier
+    existing = get_server_by_name(data, identifier)
+    if existing:
+        return existing[0]
+    return None
+
+
+async def set_server_name_color(json_path: str, identifier: str, color: str) -> Tuple[bool, str]:
+    """Set display color for a server name. Returns (ok, message)."""
+    color_hex = parse_color_to_hex(color)
+    if not color_hex:
+        return False, "颜色格式无效，请使用 #RRGGBB / #RGB / R,G,B"
+
+    data = await read_json(json_path)
+    data = ensure_colors_section(data)
+    server_id = resolve_server_id(data, identifier)
+    if not server_id:
+        return False, f"未找到服务器 {identifier}"
+
+    data["colors"]["server_names"][str(server_id)] = color_hex
+    await write_json(json_path, data)
+    name = data["servers"][server_id].get("name", identifier)
+    return True, f"已设置服务器「{name}」(ID {server_id}) 名称颜色为 {color_hex}"
+
+
+async def set_player_name_color(json_path: str, player_name: str, color: str) -> Tuple[bool, str]:
+    """Set display color for a player name across all servers in the group."""
+    color_hex = parse_color_to_hex(color)
+    if not color_hex:
+        return False, "颜色格式无效，请使用 #RRGGBB / #RGB / R,G,B"
+    player_name = (player_name or "").strip()
+    if not player_name:
+        return False, "请提供玩家名称"
+
+    data = await read_json(json_path)
+    data = ensure_colors_section(data)
+    data["colors"]["players"][player_name] = color_hex
+    await write_json(json_path, data)
+    return True, f"已设置玩家「{player_name}」名称颜色为 {color_hex}（本群所有服务器卡片生效）"
+
+
+async def clear_server_name_color(json_path: str, identifier: str) -> Tuple[bool, str]:
+    data = await read_json(json_path)
+    data = ensure_colors_section(data)
+    server_id = resolve_server_id(data, identifier)
+    if not server_id:
+        return False, f"未找到服务器 {identifier}"
+    existed = data["colors"]["server_names"].pop(str(server_id), None)
+    await write_json(json_path, data)
+    name = data["servers"][server_id].get("name", identifier)
+    if existed is None:
+        return True, f"服务器「{name}」未设置名称颜色"
+    return True, f"已清除服务器「{name}」(ID {server_id}) 的名称颜色"
+
+
+async def clear_player_name_color(json_path: str, player_name: str) -> Tuple[bool, str]:
+    player_name = (player_name or "").strip()
+    if not player_name:
+        return False, "请提供玩家名称"
+    data = await read_json(json_path)
+    data = ensure_colors_section(data)
+    players = data["colors"]["players"]
+    # exact first, then case-insensitive
+    key = player_name if player_name in players else None
+    if key is None:
+        for k in list(players.keys()):
+            if k.lower() == player_name.lower():
+                key = k
+                break
+    if key is None:
+        return True, f"玩家「{player_name}」未设置名称颜色"
+    players.pop(key, None)
+    await write_json(json_path, data)
+    return True, f"已清除玩家「{key}」的名称颜色"
+
+
+async def list_colors(json_path: str) -> str:
+    data = await read_json(json_path)
+    data = ensure_colors_section(data)
+    servers = data.get("servers", {})
+    server_colors = data["colors"]["server_names"]
+    player_colors = data["colors"]["players"]
+
+    lines = ["【服务器名称颜色】"]
+    if server_colors:
+        for sid, color in server_colors.items():
+            sinfo = servers.get(str(sid), {})
+            sname = sinfo.get("name", "未知")
+            lines.append(f"• {sname} (ID {sid}): {color}")
+    else:
+        lines.append("（无）")
+
+    lines.append("")
+    lines.append("【玩家名称颜色】（跨本群所有服务器）")
+    if player_colors:
+        for pname, color in player_colors.items():
+            lines.append(f"• {pname}: {color}")
+    else:
+        lines.append("（无）")
+
+    lines.append("")
+    lines.append("设置示例：")
+    lines.append("/mccolor server 主服 #00FFC8")
+    lines.append("/mccolor player Steve #FF55FF")
+    lines.append("/mccolor clear server 主服")
+    lines.append("/mccolor clear player Steve")
+    return "\n".join(lines)
