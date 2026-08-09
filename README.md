@@ -13,6 +13,9 @@ astrbot_mcgetter 是一个面向群聊使用场景的 Minecraft 服务器查询�
 - 多服务器状态查询与图片化展示
 - 服务器清单管理（增删改查、按群隔离）
 - 绑定整合包数据后进行 AI 分析（mods/kubejs）
+- **MC百科 (mcmod.cn) 集成**：链接导读、`/mcmod` Agent 问答、定时/冷场推送
+
+当前版本：**v1.8.0**
 
 如果你只想快速用起来，重点看“快速开始”和“核心命令总览”。
 
@@ -31,10 +34,17 @@ astrbot_mcgetter 是一个面向群聊使用场景的 Minecraft 服务器查询�
 - 支持本地工具读取与检索，必要时可扩展网络检索
 - 输出附带耗时与工具调用统计，方便排查分析过程
 
-### 3. 管理与安全
+### 3. MC百科集成（mcmod.cn）
+
+- **链接导读（默认开启）**：群内发送 `mcmod.cn/class|modpack|item|post` 链接时，自动爬取并 LLM 短摘要
+- **`/mcmod <问题>`**：`tool_loop_agent` + 搜索/读页/动态源工具，整理回答并附参考链接
+- **子命令**：`search` / `info` / `random` / `latest` / `updates`
+- **推送**：群主/群管/系统管理员 `/mcmod push on` 后，每晚 19:00 晚报 + 每小时冷场概率推送（模组与整合包混排）
+
+### 4. 管理与安全
 
 - 群维度独立数据，不同群互不干扰
-- `/mcq` 支持权限控制与白名单管理（`/mcop`）
+- `/mcq` 支持权限控制与白名单管理（`/mcop`）；群主/群管判断基于 OneBot `sender.role` 等正确来源
 - 地址格式校验与强制添加模式
 
 ## 快速开始
@@ -148,6 +158,12 @@ pack_output_zip.bat 6
 | `/mcop`      | @用户 或 用户ID            | 将用户加入 mcq 白名单 |
 | `/mctem`     | `[list\|主题名]`         | 查看/切换**本群**卡片主题 |
 | `/mccolor`   | `server\|player\|list\|clear …` | 设置服务器名 / 玩家名颜色 |
+| `/mctag`     | `<名称/ID> 标签…` / `clear` / `list` | 服务器卡片标签 |
+| `/mcmod`     | `<问题>` 或子命令          | MC百科问答（tool_loop Agent） |
+| `/mcmod search` | 关键词                 | 仅搜索百科 |
+| `/mcmod info` | url 或 id              | 条目详情 |
+| `/mcmod random` / `latest` / `updates` | `[n]` | 随便看看 / 最新收录 / 有新动态（模组+整合包） |
+| `/mcmod push` | `on\|off\|status\|now` | 本群百科推送（需群主/管/系统管理员） |
 
 ### 查询服务器流程
 
@@ -224,6 +240,23 @@ pack_output_zip.bat 6
 /mcq 3
 /mcq 3 分析kubejs主要做了哪些玩法改动
 ```
+
+### MC百科（mcmod.cn）
+
+```text
+/mcmod 机械动力是什么
+/mcmod search 暮色森林
+/mcmod info 2021
+/mcmod random
+/mcmod latest 5
+/mcmod updates 5
+/mcmod push on
+/mcmod push status
+```
+
+- 群内直接发送百科链接（如 `https://www.mcmod.cn/class/2021.html`）会自动导读（可在插件配置关闭 `mcmod_link_preview`）。
+- 推送开启后：每晚 19:00 晚报；每小时按冷场概率 `idle分钟*3 - 10*今日推送次数` 尝试推送（今日次数含晚报，每日次数有硬顶）。
+- 依赖机器人已配置可用的对话模型（`text_chat` / `tool_loop_agent`）。
 
 #### 3) 权限与白名单
 

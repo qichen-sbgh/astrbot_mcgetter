@@ -2,12 +2,16 @@ from typing import List, Optional, Dict, Any
 from pathlib import Path
 import astrbot.core.message.components as Comp
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from .script.get_server_info import get_server_status
 from .script.template_selector import get_img, format_template_help, resolve_template_name
 from .script.mcbind_service import McBindService
 from .script.mcq_service import McqService
+from .script.permission import can_manage_group_feature, can_use_mcq, resolve_roles
+from .script.mcmod.service import McmodService, parse_mcmod_subcommand
+from .script.mcmod.push_logic import can_push_more, record_push, should_trigger_cold_room
 from .script.json_operate import (
     read_json, add_data, del_data, update_data,
     get_all_servers, get_server_info, get_server_by_name,
@@ -19,6 +23,7 @@ from .script.json_operate import (
 )
 import asyncio
 import re
+import time
 from datetime import datetime
 from time import localtime, strftime
 
@@ -97,9 +102,18 @@ HELP_INFO = """
 
 /mctag list
 --查看本群所有服务器标签
+
+/mcmod <问题>
+--检索 MC百科 并用 Agent 整理回答（含参考链接）
+
+/mcmod search|info|random|latest|updates
+--搜索 / 详情 / 随便看看 / 最新收录 / 有新动态
+
+/mcmod push on|off|status|now
+--本群百科推送开关（群主/群管/系统管理员）；now 立即推送
 """
 
-@register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片", "1.7.0")
+@register("astrbot_mcgetter", "QiChen", "查询mc服务器信息和玩家列表,渲染为图片；集成MC百科", "1.8.0")
 class MyPlugin(Star):
     """Minecraft服务器信息查询插件"""
     
@@ -114,8 +128,27 @@ class MyPlugin(Star):
         self.plugin_config = config or {}
         self.mcbind_service = McBindService()
         self.mcq_service = McqService()
+        self.mcmod_service = McmodService(get_config=self._get_plugin_config_value)
         # 并发 /mc 时串行写群 JSON，避免 last_success 等状态互相覆盖
         self._status_update_lock = asyncio.Lock()
+        self._mcmod_scheduler_task: Optional[asyncio.Task] = None
+        self._mcmod_last_evening_date: str = ""
+        self._mcmod_last_hourly_slot: str = ""
+        try:
+            self._mcmod_scheduler_task = asyncio.create_task(self._mcmod_scheduler_loop())
+        except Exception as e:
+            logger.warning("mcmod scheduler start failed: %s", e)
+
+    async def terminate(self):
+        task = getattr(self, "_mcmod_scheduler_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
 
     @filter.command("mchelp")
     async def get_help(self, event: AstrMessageEvent) -> MessageEventResult:
@@ -607,7 +640,7 @@ class MyPlugin(Star):
     async def mcq(self, event: AstrMessageEvent) -> MessageEventResult:
         """对指定服务器已绑定内容进行 Agent 分析。"""
         try:
-            if not self._can_use_mcq(event):
+            if not await self._can_use_mcq(event):
                 yield event.plain_result(
                     "你没有权限使用 /mcq。默认仅系统管理员、群主/群管理员、群等级达到阈值用户可用；"
                     "管理员可用 /mcop @用户 或 /mcop 用户ID 添加白名单。"
@@ -619,11 +652,136 @@ class MyPlugin(Star):
         except Exception as e:
             yield event.plain_result("执行 mcq 分析时发生错误:" + str(e))
 
+    @filter.command("mcmod")
+    async def mcmod_cmd(self, event: AstrMessageEvent) -> MessageEventResult:
+        """MC百科问答 / 子命令 / 推送控制。"""
+        try:
+            if not bool(self._get_plugin_config_value("mcmod_enabled", True)):
+                yield event.plain_result("MC百科功能已在配置中关闭。")
+                return
+
+            sub, rest = parse_mcmod_subcommand(event.message_str)
+            svc = self.mcmod_service
+
+            if sub in {"help", "?"}:
+                yield event.plain_result(svc.help_text())
+                return
+
+            if sub == "push":
+                async for msg in self._mcmod_push_cmd(event, rest):
+                    yield msg
+                return
+
+            if sub == "search":
+                if not rest:
+                    yield event.plain_result("用法：/mcmod search <关键词>")
+                    return
+                yield event.plain_result(await svc.cmd_search(rest))
+                return
+
+            if sub == "info":
+                yield event.plain_result(await svc.cmd_info(rest))
+                return
+
+            if sub == "random":
+                yield event.plain_result(
+                    await svc.cmd_random(self.context, event.unified_msg_origin)
+                )
+                return
+
+            if sub == "latest":
+                n = 5
+                if rest.strip().isdigit():
+                    n = int(rest.strip())
+                yield event.plain_result(await svc.cmd_latest(n))
+                return
+
+            if sub == "updates":
+                n = 5
+                if rest.strip().isdigit():
+                    n = int(rest.strip())
+                yield event.plain_result(await svc.cmd_updates(n))
+                return
+
+            # 默认：tool_loop 问答
+            yield event.plain_result(await svc.ask_agent(event, self.context))
+        except Exception as e:
+            logger.exception("mcmod command failed")
+            yield event.plain_result("执行 /mcmod 时发生错误:" + str(e))
+
+    async def _mcmod_push_cmd(self, event: AstrMessageEvent, rest: str):
+        parts = (rest or "").split()
+        action = (parts[0].lower() if parts else "status")
+        key = event.unified_msg_origin
+        store = self.mcmod_service.push_store
+
+        if action in {"on", "off", "now"}:
+            if not await can_manage_group_feature(event):
+                yield event.plain_result("仅系统管理员、群主或群管理员可操作推送开关。")
+                return
+
+        if action == "on":
+            store.enable(key, umo=event.unified_msg_origin, group_id=event.get_group_id() or "")
+            yield event.plain_result("已开启本群 MC百科推送（每晚19点 + 冷场概率推送）。")
+            return
+        if action == "off":
+            store.disable(key)
+            yield event.plain_result("已关闭本群 MC百科推送。")
+            return
+        if action == "now":
+            st = store.get(key)
+            if not st.enabled:
+                store.enable(key, umo=event.unified_msg_origin, group_id=event.get_group_id() or "")
+            text = await self.mcmod_service.build_push_payload(
+                self.context,
+                event.unified_msg_origin,
+                n=int(self._get_plugin_config_value("mcmod_push_items", 3) or 3),
+            )
+            if not text:
+                yield event.plain_result("推送内容生成失败，请稍后再试。")
+                return
+            st = store.get(key)
+            record_push(st, "manual", time.time())
+            store.update(key, st)
+            yield event.plain_result(text)
+            return
+
+        st = store.get(key)
+        st.ensure_today()
+        yield event.plain_result(
+            f"推送状态: {'开启' if st.enabled else '关闭'}\n"
+            f"今日已推送: {st.today_push_count}\n"
+            f"上次推送: {st.last_push_kind or '-'} @ {st.last_push_at or 0}"
+        )
+
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)
+    async def on_group_mcmod_hooks(self, event: AstrMessageEvent) -> MessageEventResult:
+        """记录活跃度 + mcmod 链接自动导读。"""
+        try:
+            # 活跃度：仅已开启推送的群记录人类发言时间
+            sender = event.get_sender_id()
+            self_id = event.get_self_id()
+            if sender and sender != self_id:
+                umo = event.unified_msg_origin
+                store = self.mcmod_service.push_store
+                if store.has(umo) and store.get(umo).enabled:
+                    store.touch_human(umo)
+
+            text = (event.message_str or "").strip()
+            if text.startswith("/"):
+                return
+
+            preview = await self.mcmod_service.handle_link_preview(event, self.context)
+            if preview:
+                yield event.plain_result(preview)
+        except Exception as e:
+            logger.warning("mcmod group hook failed: %s", e)
+
     @filter.command("mcop")
     async def mcop(self, event: AstrMessageEvent, user_id: str = "") -> MessageEventResult:
         """添加 /mcq 白名单用户。"""
         try:
-            if not self._can_manage_mcq_whitelist(event):
+            if not await self._can_manage_mcq_whitelist(event):
                 yield event.plain_result("你没有权限执行 /mcop")
                 return
 
@@ -994,73 +1152,102 @@ class MyPlugin(Star):
                     continue
         return 0
 
-    def _check_group_owner_or_admin(self, event: AstrMessageEvent) -> Dict[str, bool]:
-        sender_id = event.get_sender_id()
-        group = getattr(event.message_obj, "group", None)
-        is_owner = False
-        is_group_admin = False
-
-        if group is not None:
-            owner_id = str(getattr(group, "group_owner", "") or "").strip()
-            if owner_id and sender_id and owner_id == sender_id:
-                is_owner = True
-
-            admins = getattr(group, "group_admins", None) or []
-            admin_set = {str(a).strip() for a in admins if str(a).strip()}
-            if sender_id and sender_id in admin_set:
-                is_group_admin = True
-
-        sender = getattr(event.message_obj, "sender", None)
-        sender_role = str(getattr(sender, "role", "") or "").lower()
-        event_role = str(getattr(event, "role", "") or "").lower()
-
-        if sender_role in {"owner", "group_owner"}:
-            is_owner = True
-        if sender_role in {"admin", "administrator", "group_admin"}:
-            is_group_admin = True
-        if event_role in {"owner", "group_owner"}:
-            is_owner = True
-        if event_role in {"admin", "administrator", "group_admin"}:
-            is_group_admin = True
-
-        return {"owner": is_owner, "admin": is_group_admin}
-
-    def _can_manage_mcq_whitelist(self, event: AstrMessageEvent) -> bool:
+    async def _can_manage_mcq_whitelist(self, event: AstrMessageEvent) -> bool:
         allow_astrbot_admin = bool(self._get_plugin_config_value("mcq_allow_astrbot_admin", True))
-
-        if allow_astrbot_admin and event.is_admin():
+        roles = await resolve_roles(event)
+        if allow_astrbot_admin and roles["astrbot_admin"]:
             return True
-
-        role_check = self._check_group_owner_or_admin(event)
-        if role_check["owner"] or role_check["admin"]:
+        if roles["group_owner"] or roles["group_admin"]:
             return True
-
         return False
 
-    def _can_use_mcq(self, event: AstrMessageEvent) -> bool:
-        permission_enabled = bool(self._get_plugin_config_value("mcq_permission_enabled", True))
-        if not permission_enabled:
-            return True
+    async def _can_use_mcq(self, event: AstrMessageEvent) -> bool:
+        return await can_use_mcq(
+            event,
+            permission_enabled=bool(self._get_plugin_config_value("mcq_permission_enabled", True)),
+            whitelist=self._get_mcq_whitelist(),
+            allow_astrbot_admin=bool(self._get_plugin_config_value("mcq_allow_astrbot_admin", True)),
+            allow_group_owner=bool(self._get_plugin_config_value("mcq_allow_group_owner", True)),
+            allow_group_admin=bool(self._get_plugin_config_value("mcq_allow_group_admin", True)),
+            min_group_level=int(self._get_plugin_config_value("mcq_min_group_level", 90) or 0),
+        )
 
-        sender_id = event.get_sender_id()
-        if sender_id and sender_id in self._get_mcq_whitelist():
-            return True
+    async def _mcmod_scheduler_loop(self) -> None:
+        """每分钟检查：19:00 晚报 + 整点冷场推送。"""
+        while True:
+            try:
+                await asyncio.sleep(30)
+                await self._mcmod_scheduler_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                logger.warning("mcmod scheduler tick error: %s", e)
 
-        allow_astrbot_admin = bool(self._get_plugin_config_value("mcq_allow_astrbot_admin", True))
-        allow_group_owner = bool(self._get_plugin_config_value("mcq_allow_group_owner", True))
-        allow_group_admin = bool(self._get_plugin_config_value("mcq_allow_group_admin", True))
-        min_group_level = int(self._get_plugin_config_value("mcq_min_group_level", 90) or 0)
+    async def _mcmod_scheduler_tick(self) -> None:
+        if not bool(self._get_plugin_config_value("mcmod_enabled", True)):
+            return
+        now = datetime.now()
+        evening_hour = int(self._get_plugin_config_value("mcmod_evening_push_hour", 19) or 19)
+        today = now.date().isoformat()
+        hour_slot = now.strftime("%Y-%m-%d-%H")
 
-        if allow_astrbot_admin and event.is_admin():
-            return True
+        # 晚报：当日 hour==evening 且未发
+        if now.hour == evening_hour and now.minute < 5 and self._mcmod_last_evening_date != today:
+            self._mcmod_last_evening_date = today
+            await self._mcmod_broadcast_push(kind="evening")
 
-        role_check = self._check_group_owner_or_admin(event)
-        if allow_group_owner and role_check["owner"]:
-            return True
-        if allow_group_admin and role_check["admin"]:
-            return True
+        # 冷场：每小时整点后 5 分钟内最多触发一次检查
+        if (
+            bool(self._get_plugin_config_value("mcmod_hourly_push", True))
+            and now.minute < 5
+            and self._mcmod_last_hourly_slot != hour_slot
+        ):
+            self._mcmod_last_hourly_slot = hour_slot
+            await self._mcmod_cold_room_push()
 
-        if min_group_level > 0 and self._extract_sender_level(event) >= min_group_level:
-            return True
+    async def _mcmod_broadcast_push(self, kind: str = "evening") -> None:
+        store = self.mcmod_service.push_store
+        n = int(self._get_plugin_config_value("mcmod_push_items", 3) or 3)
+        daily_cap = int(self._get_plugin_config_value("mcmod_push_per_day_cap", 4) or 4)
+        for key, st in list(store.all_enabled().items()):
+            try:
+                st.ensure_today()
+                if not can_push_more(st, daily_cap=daily_cap):
+                    continue
+                text = await self.mcmod_service.build_push_payload(self.context, st.umo, n=n)
+                if not text:
+                    continue
+                await self.context.send_message(st.umo, MessageChain([Comp.Plain(text)]))
+                record_push(st, kind, time.time())
+                store.update(key, st)
+            except Exception as e:
+                logger.warning("mcmod evening push failed %s: %s", key, e)
 
-        return False
+    async def _mcmod_cold_room_push(self) -> None:
+        store = self.mcmod_service.push_store
+        n = int(self._get_plugin_config_value("mcmod_push_items", 3) or 3)
+        daily_cap = int(self._get_plugin_config_value("mcmod_push_per_day_cap", 4) or 4)
+        idle_skip = float(self._get_plugin_config_value("mcmod_idle_skip_minutes", 10) or 10)
+        now_ts = time.time()
+        for key, st in list(store.all_enabled().items()):
+            try:
+                st.ensure_today()
+                if not can_push_more(st, daily_cap=daily_cap):
+                    continue
+                last = st.last_human_msg_at or st.enabled_at or now_ts
+                idle_min = max(0.0, (now_ts - last) / 60.0)
+                if not should_trigger_cold_room(
+                    idle_min,
+                    st.today_push_count,
+                    idle_skip_minutes=idle_skip,
+                    daily_cap=daily_cap,
+                ):
+                    continue
+                text = await self.mcmod_service.build_push_payload(self.context, st.umo, n=n)
+                if not text:
+                    continue
+                await self.context.send_message(st.umo, MessageChain([Comp.Plain(text)]))
+                record_push(st, "cold", now_ts)
+                store.update(key, st)
+            except Exception as e:
+                logger.warning("mcmod cold push failed %s: %s", key, e)

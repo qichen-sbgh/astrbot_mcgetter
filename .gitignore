@@ -31,3 +31,9 @@ search_results*.txt
 
 # Design prototypes & local render previews (not for plugin release)
 design_prototypes/
+
+# Local design docs (not for release / do not commit)
+PLAN_MCMOD.md
+
+# Local runtime / AstrBot data (not for plugin release)
+data/

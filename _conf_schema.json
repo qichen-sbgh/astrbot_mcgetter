@@ -34,5 +34,50 @@
     "type": "list",
     "description": "/mcq 白名单用户 ID 列表",
     "default": []
+  },
+  "mcmod_enabled": {
+    "type": "bool",
+    "description": "是否启用 MC百科 (mcmod.cn) 集成",
+    "default": true
+  },
+  "mcmod_link_preview": {
+    "type": "bool",
+    "description": "群消息中的 mcmod 链接是否自动导读（默认开启）",
+    "default": true
+  },
+  "mcmod_evening_push_hour": {
+    "type": "int",
+    "description": "百科晚报推送小时（本地时间，0-23）",
+    "default": 19
+  },
+  "mcmod_hourly_push": {
+    "type": "bool",
+    "description": "是否启用每小时冷场概率推送",
+    "default": true
+  },
+  "mcmod_idle_skip_minutes": {
+    "type": "int",
+    "description": "最近多少分钟内有人类发言则跳过冷场推送",
+    "default": 10
+  },
+  "mcmod_push_per_day_cap": {
+    "type": "int",
+    "description": "每群每日推送次数硬顶（含晚报）",
+    "default": 4
+  },
+  "mcmod_push_items": {
+    "type": "int",
+    "description": "每次推送的百科条目数",
+    "default": 3
+  },
+  "mcmod_user_cooldown_sec": {
+    "type": "int",
+    "description": "/mcmod 问答用户冷却秒数",
+    "default": 8
+  },
+  "mcmod_request_timeout": {
+    "type": "int",
+    "description": "访问 mcmod.cn 的 HTTP 超时秒数",
+    "default": 12
   }
 }

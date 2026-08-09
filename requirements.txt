@@ -1,1 +1,4 @@
 mcstatus
+aiohttp
+beautifulsoup4
+lxml
